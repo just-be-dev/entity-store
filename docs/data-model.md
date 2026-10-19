@@ -35,6 +35,41 @@ Schema versions are immutable, so each Worker isolate caches compiled schemas
 and lenses after first use; steady-state reads cost no extra queries for
 schemas.
 
+## Links between entities
+
+A `link` field holds another entity's id: `{ "type": "link", "to": "person" }`.
+It can sit anywhere a type can, so `{ "type": "array", "items": { "type": "link", "to": "person" } }`
+and `{ "type": "nullable", "of": { "type": "link", "to": "person" } }` work too.
+A schema may only link to types that exist, or to itself.
+
+- **Writes check targets.** Every new link must point at an existing,
+  undeleted entity of the `to` type, or the write fails with `422
+  LinkTargetInvalid` listing each bad path and id. An entity may link to
+  itself, including while it's being created. Only links the write adds are
+  checked: one extra query, and none when links don't change.
+- **Deletes are refused while linked.** Deleting an entity that others link to
+  fails with `409 EntityLinked` and lists who links to it. Remove those links
+  first. Deleting an entity removes its own outgoing links.
+- **The index.** `entity_links` mirrors the links in each entity's stored data
+  and is updated in the same batch as the entity, only for links that changed.
+  Two SQLite triggers make the rules hold even when a check races another
+  writer: a link can only be inserted to a live entity of the right type, and
+  an entity can't be marked deleted while a link points at it.
+- **Reads.** `?include=links` on entity and list reads adds `included`: every
+  linked entity, keyed by id, at its type's latest version.
+  `GET /api/entities/:id/backlinks` lists who links to an entity.
+
+Links are recorded per stored version: a link's `path` is the field path in
+the version the source is stored at, so a lens that renames a link field
+changes the path when the source is next written. If a new version turns a
+plain string into a link, entities stored at the old version aren't checked
+until they're rewritten at the new one.
+
+| Operation                       | Extra rows written          |
+| ------------------------------- | --------------------------- |
+| write that doesn't change links | 0                           |
+| each link added or removed      | 2 (link row + target index) |
+
 ## Schemas are data
 
 An entity schema is JSON. The root is always an object:
@@ -76,7 +111,7 @@ Every node accepts `description`; object fields accept `optional: true`.
 `pattern` runs on every write and read, so it's matched by a linear-time engine
 (`src/schema/regex.ts`) rather than backtracking `RegExp`: literals, `.`,
 classes, `\d \w \s`, `^ $`, groups, `|`, and `* + ? {n,m}` (repeat counts up
-to 100). Backreferences, lookaround, and `\b` are rejected. Lower bounds are
+to 1000). Backreferences, lookaround, and `\b` are rejected. Lower bounds are
 capped (`minLength` ≤ 1000, `minItems` ≤ 100) because the lens check generates
 documents that satisfy them.
 Field names are identifiers so lens expressions can refer to them. Writes

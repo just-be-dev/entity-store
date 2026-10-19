@@ -2,7 +2,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as SchemaAST from "effect/SchemaAST";
 import type { EntitySchema, FieldType } from "./model.ts";
-import { isFieldName } from "./model.ts";
+import { ENTITY_ID_PATTERN, TYPE_NAME_PATTERN, isFieldName } from "./model.ts";
 import { compileRegex } from "./regex.ts";
 
 /** A problem with a schema definition, located by a dotted path. */
@@ -151,6 +151,11 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
         }
         checkType(type.of, path, depth + 1, false, copies);
         return;
+      case "link":
+        if (!TYPE_NAME_PATTERN.test(type.to)) {
+          issues.push({ path, message: `'${type.to}' isn't a valid entity type name` });
+        }
+        return;
       case "boolean":
       case "json":
         return;
@@ -257,6 +262,10 @@ const compileType = (type: FieldType, mode: Mode): DynamicSchema => {
       return Schema.NullOr(compileType(type.of, mode));
     case "json":
       return Schema.Json;
+    case "link":
+      return withChecks(Schema.String, [
+        patternCheck(ENTITY_ID_PATTERN, mode, `Expected the id of a ${type.to}`),
+      ]);
   }
 };
 

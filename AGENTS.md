@@ -15,6 +15,7 @@ An entity store on Cloudflare D1 where schemas and the lenses between schema ver
 - Schema versions are immutable and append-only. `entity_types.latest_version` only moves forward, and version N+1 always carries a lens from N. Isolates cache compiled versions forever; never update a `schema_versions` row in place.
 - Writers always name the schema version they speak. Never default a write's version to "latest".
 - Every write to `entities` appends exactly one `entity_revisions` row in the same D1 batch, copied from the new head row, and is conditional on the `rev` that was read. Keep both statements in one batch.
+- `entity_links` mirrors the `link` fields of each entity's stored data. Change it only in the same batch as the entity write, and keep the 0002 triggers: they are what makes link targets and delete restriction hold under concurrent writes.
 - Reads lens stored data to the requested version and validate the result. Data that doesn't project is reported per item (`failures`), not silently dropped or returned unvalidated.
 - Lens expressions run in the API Worker on reads: keep the language pure, deterministic, prototype-safe, and bounded (`STEP_BUDGET`). Don't add I/O, clocks, randomness, or `eval`.
 - Changing the meaning of an existing lens op or expression function changes how stored data reads. Add new ops/functions instead.

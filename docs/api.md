@@ -7,11 +7,12 @@ All routes live under `/api`, take and return JSON, and return errors as
 | ------ | ------------------------------------------------------------------------------------ |
 | 400    | `BadRequest` (malformed JSON, body doesn't match the route's shape, bad query param) |
 | 404    | `TypeNotFound`, `VersionNotFound`, `EntityNotFound`, `RevisionNotFound`              |
-| 409    | `TypeAlreadyExists`, `EntityAlreadyExists`, `VersionConflict`, `RevConflict`         |
+| 409    | `TypeAlreadyExists`, `EntityAlreadyExists`, `VersionConflict`, `RevConflict`,        |
+|        | `EntityLinked` (`linkedFrom`)                                                        |
 | 410    | `EntityDeleted` (`rev` = the delete revision)                                        |
 | 413    | `BadRequest` (body too large)                                                        |
 | 422    | `InvalidSchema`/`InvalidLens` (`issues`), `LensCheckFailed` (`report`),              |
-|        | `ValidationFailed`, `ProjectionFailed`                                               |
+|        | `ValidationFailed`, `ProjectionFailed`, `LinkTargetInvalid` (`problems`)             |
 | 500    | `StorageFailure`                                                                     |
 
 ## Entity types and schema versions
@@ -51,15 +52,16 @@ type LensReport = {
 
 ## Entities
 
-| Method & path                    | Body / query                       | Returns                                                  |
-| -------------------------------- | ---------------------------------- | -------------------------------------------------------- |
-| `GET /api/types/:type/entities`  | `?version&cursor&limit` (≤ 200)    | `{ items: Entity[], failures, nextCursor? }`             |
-| `POST /api/types/:type/entities` | `{ id?, version, data }`           | `201 Entity`                                             |
-| `GET /api/entities/:id`          | `?version&rev`                     | `Entity`                                                 |
-| `PUT /api/entities/:id`          | `{ version, data, expectedRev? }`  | `Entity` (presented at `version`)                        |
-| `PATCH /api/entities/:id`        | `{ version, patch, expectedRev? }` | `Entity` (RFC 7386 merge patch, `null` deletes)          |
-| `DELETE /api/entities/:id`       | `?expectedRev`                     | `{ id, rev }`                                            |
-| `GET /api/entities/:id/history`  | `?version&before&limit`            | `{ id, type, items: Revision[], failures, nextBefore? }` |
+| Method & path                     | Body / query                       | Returns                                                  |
+| --------------------------------- | ---------------------------------- | -------------------------------------------------------- |
+| `GET /api/types/:type/entities`   | `?version&cursor&limit` (≤ 200)    | `{ items: Entity[], failures, nextCursor? }`             |
+| `POST /api/types/:type/entities`  | `{ id?, version, data }`           | `201 Entity`                                             |
+| `GET /api/entities/:id`           | `?version&rev`                     | `Entity`                                                 |
+| `PUT /api/entities/:id`           | `{ version, data, expectedRev? }`  | `Entity` (presented at `version`)                        |
+| `PATCH /api/entities/:id`         | `{ version, patch, expectedRev? }` | `Entity` (RFC 7386 merge patch, `null` deletes)          |
+| `DELETE /api/entities/:id`        | `?expectedRev`                     | `{ id, rev }`                                            |
+| `GET /api/entities/:id/backlinks` | `?cursor&limit`                    | `{ items: Backlink[], nextCursor? }`                     |
+| `GET /api/entities/:id/history`   | `?version&before&limit`            | `{ id, type, items: Revision[], failures, nextBefore? }` |
 
 ```ts
 type Entity = { id; type; version; storedVersion; rev; data; createdAt; updatedAt };
@@ -80,6 +82,14 @@ type Revision = {
 - `storedVersion` is the version the data is physically stored at.
 - Without `expectedRev`, writes retry on a lost race against a fresh read. With
   it, a stale revision fails with `409 RevConflict` and `currentRev`.
+- `include=links` adds `included: { [id]: Entity }` with every entity the
+  returned data links to, each at its type's latest version.
+- `Backlink = { source, type, path }`: an entity linking here and the field
+  path (in its stored version) holding the link.
+- Writes fail with `422 LinkTargetInvalid` (`problems: { path, target, message }[]`)
+  if a new link points at a missing, deleted, or wrong-type entity. `DELETE`
+  fails with `409 EntityLinked` (`linkedFrom: Backlink[]`, up to 20) while other
+  entities link here.
 - `failures` lists entities/revisions whose data couldn't be lensed to the
   requested version, instead of failing the whole page.
 

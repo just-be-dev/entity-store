@@ -59,6 +59,16 @@ export interface JsonType extends Common {
   readonly type: "json";
 }
 
+/**
+ * A link to another entity, stored as its id. Writes check that the target
+ * exists, isn't deleted, and has type `to`; deleting a linked-to entity is
+ * refused while links to it remain.
+ */
+export interface LinkType extends Common {
+  readonly type: "link";
+  readonly to: string;
+}
+
 export type FieldType =
   | StringType
   | NumberType
@@ -67,7 +77,8 @@ export type FieldType =
   | ArrayType
   | ObjectType
   | NullableType
-  | JsonType;
+  | JsonType
+  | LinkType;
 
 const common = {
   optional: Schema.optionalKey(Schema.Boolean),
@@ -110,6 +121,7 @@ export const FieldType: Schema.Codec<FieldType> = Schema.Union([
   }),
   Schema.Struct({ type: Schema.Literal("nullable"), of: FieldTypeRef, ...common }),
   Schema.Struct({ type: Schema.Literal("json"), ...common }),
+  Schema.Struct({ type: Schema.Literal("link"), to: Schema.String, ...common }),
 ]);
 
 /** The root of every entity schema is an object. */
@@ -133,9 +145,14 @@ export const RESERVED_NAMES: ReadonlySet<string> = new Set([
 export const isFieldName = (name: string) =>
   FIELD_NAME.test(name) && !RESERVED_NAMES.has(name) && name.length <= 64;
 
+export const TYPE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+
+/** Entity ids: what link fields hold. */
+export const ENTITY_ID_PATTERN = "^[A-Za-z0-9_-]{1,128}$";
+
 /** Entity type names: lowercase-ish slugs that are safe in URLs. */
 export const TypeName = Schema.String.check(
-  Schema.isPattern(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/, {
+  Schema.isPattern(TYPE_NAME_PATTERN, {
     message: "Type names start with a letter and use letters, digits, '_' or '-' (max 64)",
   }),
 );

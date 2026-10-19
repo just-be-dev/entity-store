@@ -1,12 +1,12 @@
 import * as Schema from "effect/Schema";
 import { LensReport } from "../lens/check.ts";
 import { Lens } from "../lens/model.ts";
-import { EntitySchema, TypeName, Version } from "../schema/model.ts";
+import { ENTITY_ID_PATTERN, EntitySchema, TypeName, Version } from "../schema/model.ts";
 
 // ─── IDs ────────────────────────────────────────────────────────────────────
 
 export const EntityId = Schema.String.check(
-  Schema.isPattern(/^[A-Za-z0-9_-]{1,128}$/, {
+  Schema.isPattern(new RegExp(ENTITY_ID_PATTERN), {
     message: "Entity ids use letters, digits, '_' or '-' (max 128)",
   }),
 ).pipe(Schema.brand("EntityId"));
@@ -101,6 +101,30 @@ export const HistoryPage = Schema.Struct({
 });
 export type HistoryPage = typeof HistoryPage.Type;
 
+// ─── Links ──────────────────────────────────────────────────────────────────
+
+/** An entity that links to another, and the field path it links from. */
+export const Backlink = Schema.Struct({
+  source: EntityId,
+  type: TypeName,
+  /** Field path in the source's stored version, e.g. `author` or `reviewers[]`. */
+  path: Schema.String,
+});
+export type Backlink = typeof Backlink.Type;
+
+export const BacklinkPage = Schema.Struct({
+  items: Schema.Array(Backlink),
+  nextCursor: Schema.optionalKey(Schema.String),
+});
+export type BacklinkPage = typeof BacklinkPage.Type;
+
+export const LinkProblem = Schema.Struct({
+  path: Schema.String,
+  target: Schema.String,
+  message: Schema.String,
+});
+export type LinkProblem = typeof LinkProblem.Type;
+
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 export class TypeNotFound extends Schema.TaggedError<TypeNotFound>()("TypeNotFound", {
@@ -175,6 +199,18 @@ export class ProjectionFailed extends Schema.TaggedError<ProjectionFailed>()("Pr
   message: Schema.String,
 }) {}
 
+/** A link field points at an entity that's missing, deleted, or of the wrong type. */
+export class LinkTargetInvalid extends Schema.TaggedError<LinkTargetInvalid>()(
+  "LinkTargetInvalid",
+  { problems: Schema.Array(LinkProblem) },
+) {}
+
+/** The entity can't be deleted while other entities link to it. */
+export class EntityLinked extends Schema.TaggedError<EntityLinked>()("EntityLinked", {
+  id: Schema.String,
+  linkedFrom: Schema.Array(Backlink),
+}) {}
+
 /** Storage misbehaved or returned data that no longer decodes. */
 export class StorageFailure extends Schema.TaggedError<StorageFailure>()("StorageFailure", {
   message: Schema.String,
@@ -195,4 +231,6 @@ export type StoreError =
   | RevConflict
   | ValidationFailed
   | ProjectionFailed
+  | LinkTargetInvalid
+  | EntityLinked
   | StorageFailure;

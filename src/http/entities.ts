@@ -66,6 +66,19 @@ const pathParam = (name: string) =>
     return value;
   });
 
+/** `?include=links` adds `included`: the linked entities, keyed by id. */
+const includeLinks = () =>
+  Effect.gen(function* () {
+    const include = yield* stringParam("include");
+    if (include === undefined) {
+      return false;
+    }
+    if (include !== "links") {
+      return yield* new BadRequest({ status: 400, message: "include must be 'links'" });
+    }
+    return true;
+  });
+
 const route = <E extends StoreError | BadRequest, R>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: `/api/${string}`,
@@ -147,12 +160,15 @@ export const entityRoutes = Layer.mergeAll(
     "/api/types/:type/entities",
     Effect.gen(function* () {
       const store = yield* EntityStore;
+      const page = yield* store.list(yield* pathParam("type"), {
+        version: yield* intParam("version"),
+        cursor: yield* stringParam("cursor"),
+        limit: yield* intParam("limit"),
+      });
       return json(
-        yield* store.list(yield* pathParam("type"), {
-          version: yield* intParam("version"),
-          cursor: yield* stringParam("cursor"),
-          limit: yield* intParam("limit"),
-        }),
+        (yield* includeLinks())
+          ? { ...page, included: yield* store.resolveLinks(page.items) }
+          : page,
       );
     }),
   ),
@@ -170,11 +186,14 @@ export const entityRoutes = Layer.mergeAll(
     "/api/entities/:id",
     Effect.gen(function* () {
       const store = yield* EntityStore;
+      const entity = yield* store.get(yield* pathParam("id"), {
+        version: yield* intParam("version"),
+        rev: yield* intParam("rev"),
+      });
       return json(
-        yield* store.get(yield* pathParam("id"), {
-          version: yield* intParam("version"),
-          rev: yield* intParam("rev"),
-        }),
+        (yield* includeLinks())
+          ? { ...entity, included: yield* store.resolveLinks([entity]) }
+          : entity,
       );
     }),
   ),
@@ -204,6 +223,19 @@ export const entityRoutes = Layer.mergeAll(
       return json(
         yield* store.remove(yield* pathParam("id"), {
           expectedRev: yield* intParam("expectedRev"),
+        }),
+      );
+    }),
+  ),
+  route(
+    "GET",
+    "/api/entities/:id/backlinks",
+    Effect.gen(function* () {
+      const store = yield* EntityStore;
+      return json(
+        yield* store.backlinks(yield* pathParam("id"), {
+          cursor: yield* stringParam("cursor"),
+          limit: yield* intParam("limit"),
         }),
       );
     }),

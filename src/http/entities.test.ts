@@ -209,6 +209,66 @@ describe("entity HTTP API", () => {
     }),
   );
 
+  it.effect("links: checked writes, included reads, backlinks, guarded deletes", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", {
+        name: "person",
+        schema: { fields: { name: { type: "string" } } },
+      });
+      const post = yield* call("POST", "/api/types", {
+        name: "post",
+        schema: {
+          fields: {
+            title: { type: "string" },
+            author: { type: "link", to: "person" },
+          },
+        },
+      });
+      expect(post.status).toBe(201);
+      const badSchema = yield* call("POST", "/api/types", {
+        name: "comment",
+        schema: { fields: { on: { type: "link", to: "nothing" } } },
+      });
+      expect(badSchema.status).toBe(422);
+
+      yield* call("POST", "/api/types/person/entities", {
+        id: "ada",
+        version: 1,
+        data: { name: "Ada" },
+      });
+      const dangling = yield* call("POST", "/api/types/post/entities", {
+        version: 1,
+        data: { title: "x", author: "nobody" },
+      });
+      expect(dangling.status).toBe(422);
+      expect(dangling.body).toMatchObject({
+        code: "LinkTargetInvalid",
+        problems: [{ path: "author", target: "nobody" }],
+      });
+      yield* call("POST", "/api/types/post/entities", {
+        id: "p1",
+        version: 1,
+        data: { title: "x", author: "ada" },
+      });
+
+      const withLinks = yield* call("GET", "/api/entities/p1?include=links");
+      expect(withLinks.body.included.ada).toMatchObject({ type: "person", data: { name: "Ada" } });
+      const listed = yield* call("GET", "/api/types/post/entities?include=links");
+      expect(Object.keys(listed.body.included)).toEqual(["ada"]);
+      expect((yield* call("GET", "/api/entities/p1?include=everything")).status).toBe(400);
+
+      const back = yield* call("GET", "/api/entities/ada/backlinks");
+      expect(back.body).toEqual({ items: [{ source: "p1", type: "post", path: "author" }] });
+
+      const refused = yield* call("DELETE", "/api/entities/ada");
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({ code: "EntityLinked", linkedFrom: [{ source: "p1" }] });
+      expect((yield* call("DELETE", "/api/entities/p1")).status).toBe(200);
+      expect((yield* call("DELETE", "/api/entities/ada")).status).toBe(200);
+    }),
+  );
+
   it.effect("runs lenses and lists functions for authoring", () =>
     Effect.gen(function* () {
       const call = yield* makeClient;

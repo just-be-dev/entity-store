@@ -7,6 +7,7 @@ A schema-versioned entity store on Cloudflare D1, built with Effect 4, Foldkit, 
 - **Versioned schemas with lenses.** A new schema version carries a lens from the previous one: a list of bidirectional ops (`rename`, `add`, `convert`, `hoist`, `derive`, …) with a small, pure expression language for computed fields. Lenses are data too, authored in the UI.
 - **Lenses run at read time.** Data stays at the version it was written in and is lensed to whichever version a reader asks for. Old writers keep working: their edits are translated forward without clobbering fields they can't see.
 - **Checked lenses.** Before a version is saved, its lens is property-checked against random documents of both schemas and against stored data, with counterexamples shown in the UI.
+- **Links between entities.** A `link` field points at another entity of a given type. Writes check that targets exist, deletes are refused while something links to an entity, and reads can include linked entities or list backlinks.
 - **History on every write.** Each write appends a snapshot revision in the same D1 transaction, for 2 rows written per edit, with optimistic concurrency on `rev`.
 
 ```sh
@@ -46,7 +47,8 @@ The version is saved only if the lens check passes. Had v1 required `minLength: 
 ## Layout
 
 ```text
-migrations/0001_entity_store.sql  D1 tables: entity_types, schema_versions, entities, entity_revisions
+migrations/                       D1 tables: entity_types, schema_versions, entities,
+                                  entity_revisions (0001); entity_links + triggers (0002)
 src/
   schema/                         schema-as-data model and compiler to Effect Schema
   lens/                           lens ops, expression language, lens property check
@@ -65,6 +67,7 @@ src/
 - **No authentication.** Both Workers are public. Anyone who can reach the URL can create types, versions, and entities. Add identity and authorization covering both entry points before deploying anywhere shared.
 - No filtering beyond listing by type. Querying by field across versions needs a design (fields can be renamed between versions); `json_extract` expression indexes per version are the likely route.
 - Deletes are soft (tombstone plus a `delete` revision). There's no restore or purge yet.
+- Links only restrict deletes; there's no cascade or "unlink on delete" option yet.
 
 ## Deploying
 

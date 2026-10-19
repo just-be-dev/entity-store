@@ -114,6 +114,7 @@ const statusOf = (error: StoreError | BadRequest): number => {
     case "EntityAlreadyExists":
     case "VersionConflict":
     case "RevConflict":
+    case "EntityLinked":
       return 409;
     case "EntityDeleted":
       return 410;
@@ -122,6 +123,7 @@ const statusOf = (error: StoreError | BadRequest): number => {
     case "LensCheckFailed":
     case "ValidationFailed":
     case "ProjectionFailed":
+    case "LinkTargetInvalid":
       return 422;
     case "StorageFailure":
       return 500;
@@ -160,6 +162,12 @@ const messageOf = (error: StoreError | BadRequest): string => {
       return `Data doesn't match ${error.type} v${error.version}: ${error.message}`;
     case "ProjectionFailed":
       return `Couldn't present ${error.type} v${error.from} data as v${error.to}: ${error.message}`;
+    case "LinkTargetInvalid":
+      return error.problems.length === 0
+        ? "A linked entity doesn't exist, was deleted, or has the wrong type"
+        : error.problems.map((p) => `${p.path}: ${p.message}`).join("; ");
+    case "EntityLinked":
+      return `Entity '${error.id}' is linked from other entities; remove those links first`;
     case "StorageFailure":
       return "Storage error";
   }
@@ -176,6 +184,10 @@ const detailsOf = (error: StoreError | BadRequest): Record<string, unknown> => {
       return { currentRev: error.currentRev };
     case "EntityDeleted":
       return { rev: error.rev };
+    case "LinkTargetInvalid":
+      return { problems: error.problems };
+    case "EntityLinked":
+      return { linkedFrom: error.linkedFrom };
     default:
       return {};
   }

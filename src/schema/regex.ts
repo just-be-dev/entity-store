@@ -27,7 +27,7 @@ class RegexError extends Error {
   override readonly name = "RegexError";
 }
 
-const MAX_REPEAT = 100;
+const MAX_REPEAT = 1000;
 const MAX_STATES = 2000;
 
 const isDigit: Pred = (c) => c >= 48 && c <= 57;

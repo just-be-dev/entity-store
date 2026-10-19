@@ -62,7 +62,8 @@ describe("linear-time regex", () => {
     expect(error("(a)\\1")).toMatch(/Unsupported escape/);
     expect(error("a(?=b)")).toMatch(/Lookaround/);
     expect(error("\\bword")).toMatch(/\\b/);
-    expect(error("a{1000}")).toMatch(/limited/);
+    expect(error("a{1001}")).toMatch(/limited/);
+    expect(error("(ab|cd|ef){900}")).toMatch(/too large/);
     expect(error("(ab")).toMatch(/Unterminated group/);
     expect(error("[a-")).toMatch(/Unterminated/);
     expect(error("*a")).toMatch(/Nothing to repeat/);

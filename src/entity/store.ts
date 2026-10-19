@@ -12,23 +12,31 @@ import type { LensReport } from "../lens/check.ts";
 import { checkLens } from "../lens/check.ts";
 import type { Lens } from "../lens/model.ts";
 import { checkDefinition, compiled } from "../schema/compile.ts";
+import type { Link } from "../schema/links.ts";
+import { diffLinks, extractLinks, linkedTypes } from "../schema/links.ts";
 import type { EntitySchema } from "../schema/model.ts";
 import type {
+  Backlink,
+  BacklinkPage,
   Entity,
   EntityPage,
+  LinkProblem,
   HistoryPage,
   Operation,
   Revision,
+  StoreError,
   TypeInfo,
   VersionInfo,
 } from "./model.ts";
 import {
   EntityAlreadyExists,
   EntityDeleted,
+  EntityLinked,
   EntityNotFound,
   InvalidLens,
   InvalidSchema,
   LensCheckFailed,
+  LinkTargetInvalid,
   ProjectionFailed,
   RevConflict,
   RevisionNotFound,
@@ -74,6 +82,14 @@ const RevisionRow = Schema.Struct({
 });
 
 const storageFailure = (error: SqlError) => new StorageFailure({ message: error.message });
+
+/** D1 allows 100 bound parameters per statement; stay well under it. */
+const MAX_IN = 90;
+const chunks = <A>(items: ReadonlyArray<A>): Array<ReadonlyArray<A>> =>
+  Array.from({ length: Math.ceil(items.length / MAX_IN) }, (_, i) =>
+    items.slice(i * MAX_IN, (i + 1) * MAX_IN),
+  );
+const placeholders = (items: ReadonlyArray<unknown>) => items.map(() => "?").join(", ");
 
 // ─── Inputs ─────────────────────────────────────────────────────────────────
 
@@ -121,6 +137,99 @@ const makeEntityStore = Effect.gen(function* () {
   const registry = yield* makeRegistry;
 
   const all = (statement: Statement) => db.all(statement).pipe(Effect.mapError(storageFailure));
+
+  // ── Links ──
+
+  /** Links held by `data`, which is stored at `version` of `type`. */
+  const linksOf = Effect.fn("EntityStore.linksOf")(function* (
+    type: string,
+    version: number,
+    data: Json,
+  ) {
+    const loaded = yield* registry.version(type, version);
+    return extractLinks(loaded.info.schema, data);
+  });
+
+  /** Readable errors for new links whose targets are missing, deleted, or the wrong type. */
+  const checkTargets = Effect.fn("EntityStore.checkTargets")(function* (
+    links: ReadonlyArray<Link>,
+    self: { readonly id: string; readonly type: string },
+  ) {
+    const ids = [...new Set(links.map((link) => link.target).filter((t) => t !== self.id))];
+    const found = new Map<string, { readonly type: string; readonly deleted: boolean }>();
+    for (const group of chunks(ids)) {
+      const rows = yield* all(
+        sql(
+          `SELECT id, type, deleted FROM entities WHERE id IN (${placeholders(group)})`,
+          ...group,
+        ),
+      );
+      rows.forEach((row) =>
+        found.set(String(row["id"]), {
+          type: String(row["type"]),
+          deleted: Number(row["deleted"]) !== 0,
+        }),
+      );
+    }
+    const problems: Array<LinkProblem> = [];
+    for (const link of links) {
+      const target =
+        link.target === self.id ? { type: self.type, deleted: false } : found.get(link.target);
+      const message =
+        target === undefined
+          ? `no entity '${link.target}'`
+          : target.deleted
+            ? `entity '${link.target}' was deleted`
+            : target.type !== link.targetType
+              ? `'${link.target}' is a ${target.type}, not a ${link.targetType}`
+              : undefined;
+      if (message !== undefined) {
+        problems.push({ path: link.path, target: link.target, message });
+      }
+    }
+    if (problems.length > 0) {
+      return yield* new LinkTargetInvalid({ problems });
+    }
+  });
+
+  const insertLink = (source: string, link: Link) =>
+    sql(
+      "INSERT INTO entity_links (source, path, target, target_type) VALUES (?, ?, ?, ?)",
+      source,
+      link.path,
+      link.target,
+      link.targetType,
+    );
+
+  const deleteLink = (source: string, link: Link) =>
+    sql(
+      "DELETE FROM entity_links WHERE source = ? AND path = ? AND target = ?",
+      source,
+      link.path,
+      link.target,
+    );
+
+  const backlinkQuery = (where: string) =>
+    `SELECT l.source, l.path, e.type FROM entity_links l JOIN entities e ON e.id = l.source WHERE ${where}`;
+
+  const toBacklinks = (rows: ReadonlyArray<Record<string, unknown>>): Array<Backlink> =>
+    rows.map((row) => ({
+      source: String(row["source"]) as Backlink["source"],
+      path: String(row["path"]),
+      type: String(row["type"]),
+    }));
+
+  /** Translate the link triggers' errors (a lost race with another writer). */
+  const writeError =
+    (id: string, onConstraint: () => StoreError) =>
+    (error: SqlError): StoreError =>
+      error.message.includes("LINK_TARGET_INVALID")
+        ? new LinkTargetInvalid({ problems: [] })
+        : error.message.includes("ENTITY_LINKED")
+          ? new EntityLinked({ id, linkedFrom: [] })
+          : error.constraint
+            ? onConstraint()
+            : storageFailure(error);
 
   // ── Projection: run lenses between versions, then validate the result ──
 
@@ -204,15 +313,36 @@ const makeEntityStore = Effect.gen(function* () {
 
   // ── Types and versions ──
 
-  const definitionIssues = (schema: EntitySchema) => {
-    const issues = checkDefinition(schema);
-    return issues.length > 0
-      ? Effect.fail(new InvalidSchema({ issues }))
-      : Effect.succeed(compiled(schema));
-  };
+  /** Check a schema, including that every type it links to exists (or is the type itself). */
+  const definitionIssues = Effect.fn("EntityStore.definitionIssues")(function* (
+    schema: EntitySchema,
+    self: string,
+  ) {
+    const issues = [...checkDefinition(schema)];
+    if (issues.length === 0) {
+      const targets = [...linkedTypes(schema)].filter((type) => type !== self);
+      const found = new Set<string>();
+      for (const group of chunks(targets)) {
+        const rows = yield* all(
+          sql(`SELECT name FROM entity_types WHERE name IN (${placeholders(group)})`, ...group),
+        );
+        rows.forEach((row) => found.add(String(row["name"])));
+      }
+      for (const missing of targets.filter((type) => !found.has(type))) {
+        issues.push({
+          path: "",
+          message: `Links point at '${missing}', which isn't an entity type`,
+        });
+      }
+    }
+    if (issues.length > 0) {
+      return yield* new InvalidSchema({ issues });
+    }
+    return compiled(schema);
+  });
 
   const createType = Effect.fn("EntityStore.createType")(function* (input: CreateTypeInput) {
-    yield* definitionIssues(input.schema);
+    yield* definitionIssues(input.schema, input.name);
     const now = yield* Clock.currentTimeMillis;
     yield* db
       .batch([
@@ -286,7 +416,7 @@ const makeEntityStore = Effect.gen(function* () {
     options?: { readonly samples?: number },
   ) {
     const summary = yield* registry.getType(name);
-    const to = yield* definitionIssues(input.schema);
+    const to = yield* definitionIssues(input.schema, name);
     const lens = compileLens(input.lens);
     if (Result.isFailure(lens)) {
       return yield* new InvalidLens({ issues: lens.failure });
@@ -408,6 +538,8 @@ const makeEntityStore = Effect.gen(function* () {
     yield* requireVersion(type, input.version, summary.latestVersion);
     const data = yield* validate(type, input.version, input.data);
     const id = input.id ?? (yield* newId);
+    const links = yield* linksOf(type, input.version, data);
+    yield* checkTargets(links, { id, type });
     const now = yield* Clock.currentTimeMillis;
     yield* db
       .batch([
@@ -421,12 +553,9 @@ const makeEntityStore = Effect.gen(function* () {
           now,
         ),
         appendRevision(id, 1, input.version, "create"),
+        ...links.map((link) => insertLink(id, link)),
       ])
-      .pipe(
-        Effect.mapError((error) =>
-          error.constraint ? new EntityAlreadyExists({ id }) : storageFailure(error),
-        ),
-      );
+      .pipe(Effect.mapError(writeError(id, () => new EntityAlreadyExists({ id }))));
     const entity: Entity = {
       id: id as Entity["id"],
       type,
@@ -585,31 +714,64 @@ const makeEntityStore = Effect.gen(function* () {
         }
       }
 
+      const oldLinks = yield* linksOf(row.type, row.version, row.data);
+      const newLinks = op === "delete" ? [] : yield* linksOf(row.type, storedVersion, stored);
+      const links = diffLinks(oldLinks, newLinks);
+      yield* checkTargets(links.added, { id, type: row.type });
+      if (op === "delete") {
+        const linkedFrom = yield* all(
+          sql(`${backlinkQuery("l.target = ? AND l.source != ?")} LIMIT 20`, id, id),
+        );
+        if (linkedFrom.length > 0) {
+          return yield* new EntityLinked({ id, linkedFrom: toBacklinks(linkedFrom) });
+        }
+      }
+
       const now = yield* Clock.currentTimeMillis;
       const nextRev = row.rev + 1;
+      const json = JSON.stringify(stored);
+      // The revision insert goes first: revisions are contiguous, so its primary
+      // key fails (aborting the whole batch) iff another write already moved
+      // the entity past the rev we read. Everything after it is safe to apply.
       const results = yield* db
         .batch([
+          sql(
+            "INSERT INTO entity_revisions (entity_id, rev, version, writer_version, op, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            id,
+            nextRev,
+            storedVersion,
+            writer,
+            op,
+            json,
+            now,
+          ),
+          // Removed links go before the update so deleting an entity that links
+          // to itself doesn't trip the delete guard.
+          ...links.removed.map((link) => deleteLink(id, link)),
           sql(
             "UPDATE entities SET version = ?, rev = ?, data = ?, deleted = ?, updated_at = ? WHERE id = ? AND rev = ?",
             storedVersion,
             nextRev,
-            JSON.stringify(stored),
+            json,
             op === "delete" ? 1 : 0,
             now,
             id,
             row.rev,
           ),
-          appendRevision(id, nextRev, writer, op),
+          ...links.added.map((link) => insertLink(id, link)),
         ])
         .pipe(
-          Effect.mapError((error) =>
-            error.constraint
-              ? new RevConflict({ id, expectedRev: row.rev, currentRev: nextRev })
-              : storageFailure(error),
+          Effect.mapError(
+            writeError(
+              id,
+              () => new RevConflict({ id, expectedRev: row.rev, currentRev: nextRev }),
+            ),
           ),
         );
-      if (results[0]?.changes !== 1) {
-        return yield* new RevConflict({ id, expectedRev: row.rev, currentRev: nextRev });
+      if (results[1 + links.removed.length]?.changes !== 1) {
+        return yield* new StorageFailure({
+          message: "Entity update matched no row after its revision was recorded",
+        });
       }
       const entity: Entity = {
         id: id as Entity["id"],
@@ -729,6 +891,73 @@ const makeEntityStore = Effect.gen(function* () {
     return page;
   });
 
+  /**
+   * The entities that `entities` link to, keyed by id and presented at each
+   * target type's latest version. One query per 90 distinct targets.
+   */
+  const resolveLinks = Effect.fn("EntityStore.resolveLinks")(function* (
+    entities: ReadonlyArray<Entity>,
+  ) {
+    const ids = new Set<string>();
+    for (const entity of entities) {
+      for (const link of yield* linksOf(entity.type, entity.version, entity.data)) {
+        ids.add(link.target);
+      }
+    }
+    const included: Record<string, Entity> = {};
+    for (const group of chunks([...ids])) {
+      const rows = yield* all(
+        sql(
+          `SELECT e.*, t.latest_version FROM entities e JOIN entity_types t ON t.name = e.type WHERE e.id IN (${placeholders(group)}) AND e.deleted = 0`,
+          ...group,
+        ),
+      );
+      for (const row of yield* decodeRows(EntityRow, "entity")(rows)) {
+        const presented = yield* Effect.result(present(row, row.latest_version));
+        if (Result.isSuccess(presented)) {
+          Object.defineProperty(included, row.id, {
+            value: presented.success,
+            enumerable: true,
+          });
+        }
+      }
+    }
+    return included;
+  });
+
+  /** Entities whose stored data links to `id`, ordered by source id then path. */
+  const backlinks = Effect.fn("EntityStore.backlinks")(function* (
+    id: string,
+    options?: { readonly cursor?: string | undefined; readonly limit?: number | undefined },
+  ) {
+    yield* readRow(id);
+    const limit = Math.max(1, Math.min(options?.limit ?? DEFAULT_PAGE, MAX_PAGE));
+    const slash = options?.cursor?.indexOf("/") ?? -1;
+    const [afterSource, afterPath] =
+      options?.cursor === undefined || slash < 0
+        ? ["", ""]
+        : [options.cursor.slice(0, slash), options.cursor.slice(slash + 1)];
+    const rows = yield* all(
+      sql(
+        `${backlinkQuery("l.target = ? AND (l.source > ? OR (l.source = ? AND l.path > ?))")} ORDER BY l.source, l.path LIMIT ?`,
+        id,
+        afterSource,
+        afterSource,
+        afterPath,
+        limit + 1,
+      ),
+    );
+    const items = toBacklinks(rows.slice(0, limit));
+    const last = items[items.length - 1];
+    const page: BacklinkPage = {
+      items,
+      ...(rows.length > limit && last !== undefined
+        ? { nextCursor: `${last.source}/${last.path}` }
+        : {}),
+    };
+    return page;
+  });
+
   return {
     createType,
     listTypes,
@@ -743,6 +972,8 @@ const makeEntityStore = Effect.gen(function* () {
     patch,
     remove,
     history,
+    resolveLinks,
+    backlinks,
   };
 });
 
