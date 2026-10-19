@@ -38,7 +38,7 @@ import {
   VersionConflict,
   VersionNotFound,
 } from "./model.ts";
-import { applyChanges, diff, mergePatch } from "./patch.ts";
+import { merge3, mergePatch } from "./patch.ts";
 import type { LoadedVersion } from "./registry.ts";
 import { VersionCache, decodeRows, makeRegistry } from "./registry.ts";
 import type { SqlError, Statement } from "./sql.ts";
@@ -562,7 +562,8 @@ const makeEntityStore = Effect.gen(function* () {
           currentRev: row.rev,
         });
       }
-      const writer = options.version;
+      // Deletes don't speak a version; record them at the stored one on every attempt.
+      const writer = op === "delete" ? row.version : options.version;
       yield* requireVersion(row.type, writer, row.latest_version);
       const before = yield* project(row.type, row.data, row.version, writer);
       const after = op === "delete" ? before : yield* validate(row.type, writer, change(before));
@@ -573,7 +574,7 @@ const makeEntityStore = Effect.gen(function* () {
         const beforeUp = yield* project(row.type, before, writer, row.version);
         const afterUp = yield* project(row.type, after, writer, row.version);
         storedVersion = row.version;
-        stored = applyChanges(row.data, diff(beforeUp, afterUp));
+        stored = merge3(beforeUp, afterUp, row.data);
         const valid = (yield* registry.version(row.type, row.version)).schema.validate(stored);
         if (Result.isFailure(valid)) {
           return yield* new ValidationFailed({
@@ -657,7 +658,7 @@ const makeEntityStore = Effect.gen(function* () {
     }
     const deleted = yield* mutate(
       id,
-      { version: row.version, expectedRev: options?.expectedRev },
+      { version: row.latest_version, expectedRev: options?.expectedRev },
       "delete",
       (current) => current,
     );

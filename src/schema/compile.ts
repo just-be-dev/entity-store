@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import type * as SchemaAST from "effect/SchemaAST";
 import type { EntitySchema, FieldType } from "./model.ts";
 import { isFieldName } from "./model.ts";
+import { compileRegex } from "./regex.ts";
 
 /** A problem with a schema definition, located by a dotted path. */
 export interface DefinitionIssue {
@@ -11,32 +12,36 @@ export interface DefinitionIssue {
 }
 
 const MAX_DEPTH = 10;
+const MAX_FIELDS = 500;
 const MAX_PATTERN = 200;
+/**
+ * Lower bounds force the lens check to generate documents at least that big,
+ * so they're capped to keep sampling within a Worker's memory.
+ */
+const MAX_MIN_LENGTH = 1000;
+const MAX_MIN_ITEMS = 100;
+const MAX_MIN_ITEMS_PRODUCT = 1000;
 
 /**
- * Patterns run on every write. Reject the classic catastrophic-backtracking
- * shape: a repeated group whose body starts with a quantified atom (`(a+)+`,
- * `(\\w*x)*`), so each repetition can steal input from the last. Separated
- * repeats like `[a-z]+(-[a-z]+)*` stay allowed. It's a heuristic, not a proof.
+ * Patterns run on every write and read, so they're matched with a linear-time
+ * engine (`regex.ts`) instead of backtracking RegExp. A pattern must also be a
+ * valid `u`-flag RegExp, because the lens check uses RegExp to generate samples.
  */
-const GROUP_STARTS_QUANTIFIED = /\((?:\?:)?(?:\\.|\[(?:\\.|[^\]\\])*\]|[^()|\\])[*+{]/;
-const REPEATED_GROUP = /\)(?:[*+]|\{\d*,)/;
-
 const patternProblem = (pattern: string): string | undefined => {
   if (pattern.length > MAX_PATTERN) {
     return `Patterns are limited to ${MAX_PATTERN} characters`;
+  }
+  const safe = compileRegex(pattern);
+  if (Result.isFailure(safe)) {
+    return `Unsupported pattern: ${safe.failure}`;
   }
   try {
     new RegExp(pattern, "u");
   } catch {
     return `Invalid pattern: ${pattern}`;
   }
-  if (GROUP_STARTS_QUANTIFIED.test(pattern) && REPEATED_GROUP.test(pattern)) {
-    return "Pattern nests quantifiers (like (a+)+), which can backtrack catastrophically";
-  }
   return undefined;
 };
-const MAX_FIELDS = 500;
 
 /**
  * Structural checks that the Schema decoder can't express: identifier field
@@ -50,6 +55,7 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
     fields: { readonly [name: string]: FieldType },
     path: string,
     depth: number,
+    copies: number,
   ) => {
     for (const [name, field] of Object.entries(fields)) {
       fieldCount++;
@@ -60,11 +66,18 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
           message: "Field names must be identifiers (letters, digits, '_'), max 64 characters",
         });
       }
-      checkType(field, at, depth, true);
+      checkType(field, at, depth, true, copies);
     }
   };
 
-  const checkType = (type: FieldType, path: string, depth: number, isField: boolean) => {
+  /** `copies`: how many times enclosing arrays' minItems force this node to appear. */
+  const checkType = (
+    type: FieldType,
+    path: string,
+    depth: number,
+    isField: boolean,
+    copies: number,
+  ) => {
     if (depth > MAX_DEPTH) {
       issues.push({ path, message: `Schemas may nest at most ${MAX_DEPTH} levels` });
       return;
@@ -80,6 +93,9 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
           type.minLength > type.maxLength
         ) {
           issues.push({ path, message: "minLength is greater than maxLength" });
+        }
+        if ((type.minLength ?? 0) > MAX_MIN_LENGTH) {
+          issues.push({ path, message: `minLength is limited to ${MAX_MIN_LENGTH}` });
         }
         if (type.pattern !== undefined) {
           const problem = patternProblem(type.pattern);
@@ -112,17 +128,28 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
         ) {
           issues.push({ path, message: "minItems is greater than maxItems" });
         }
-        checkType(type.items, `${path}[]`, depth + 1, false);
+        const minItems = type.minItems ?? 0;
+        if (minItems > MAX_MIN_ITEMS) {
+          issues.push({ path, message: `minItems is limited to ${MAX_MIN_ITEMS}` });
+        }
+        const nested = copies * Math.max(1, minItems);
+        if (nested > MAX_MIN_ITEMS_PRODUCT) {
+          issues.push({
+            path,
+            message: `Nested arrays may require at most ${MAX_MIN_ITEMS_PRODUCT} items in total`,
+          });
+        }
+        checkType(type.items, `${path}[]`, depth + 1, false, nested);
         return;
       }
       case "object":
-        checkFields(type.fields, path, depth + 1);
+        checkFields(type.fields, path, depth + 1, copies);
         return;
       case "nullable":
         if (type.of.type === "nullable") {
           issues.push({ path, message: "nullable of nullable is redundant" });
         }
-        checkType(type.of, path, depth + 1, false);
+        checkType(type.of, path, depth + 1, false, copies);
         return;
       case "boolean":
       case "json":
@@ -130,7 +157,7 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
     }
   };
 
-  checkFields(schema.fields, "", 0);
+  checkFields(schema.fields, "", 0, 1);
   if (fieldCount > MAX_FIELDS) {
     issues.push({ path: "", message: `Schemas may define at most ${MAX_FIELDS} fields` });
   }
@@ -140,12 +167,33 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
 // Pragmatic format checks. They describe intent and catch obvious mistakes;
 // they are not full RFC validators.
 const FORMATS = {
-  email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
-  url: /^https?:\/\/[^\s/$.?#].[^\s]*$/i,
-  uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-  date: /^\d{4}-\d{2}-\d{2}$/,
-  datetime: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/,
+  email: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+  url: "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s/$.?#][^\\s]*$",
+  uuid: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+  date: "^\\d{4}-\\d{2}-\\d{2}$",
+  datetime: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})$",
 } as const;
+
+/**
+ * Validation matches with the linear-time engine; sampling (the lens check)
+ * uses RegExp so fast-check can generate matching strings.
+ */
+type Mode = "validate" | "sample";
+
+const patternCheck = (source: string, mode: Mode, message?: string): SchemaAST.Check<string> => {
+  const annotations = message === undefined ? undefined : { message };
+  if (mode === "sample") {
+    return Schema.isPattern(new RegExp(source, "u"), annotations);
+  }
+  const safe = compileRegex(source);
+  // NOTE: definitions are checked before compiling, so this only fails for
+  // stored schemas written before a pattern rule changed; treat them as no-match.
+  const test = Result.isSuccess(safe) ? safe.success.test : () => false;
+  return Schema.makeFilter(
+    (value: string) => test(value) || (message ?? `Expected a string matching ${source}`),
+    annotations,
+  );
+};
 
 /** A compiled entity schema: decodes JSON with no service requirements. */
 export type DynamicSchema = Schema.Codec<unknown, unknown>;
@@ -158,7 +206,7 @@ const withChecks = <S extends Schema.Codec<any, any>>(
   return first === undefined ? schema : schema.check(first, ...rest);
 };
 
-const compileType = (type: FieldType): DynamicSchema => {
+const compileType = (type: FieldType, mode: Mode): DynamicSchema => {
   switch (type.type) {
     case "string": {
       const checks: Array<SchemaAST.Check<string>> = [];
@@ -169,12 +217,10 @@ const compileType = (type: FieldType): DynamicSchema => {
         checks.push(Schema.isMaxLength(type.maxLength));
       }
       if (type.pattern !== undefined) {
-        checks.push(Schema.isPattern(new RegExp(type.pattern, "u")));
+        checks.push(patternCheck(type.pattern, mode));
       }
       if (type.format !== undefined) {
-        checks.push(
-          Schema.isPattern(FORMATS[type.format], { message: `Expected a ${type.format}` }),
-        );
+        checks.push(patternCheck(FORMATS[type.format], mode, `Expected a ${type.format}`));
       }
       return withChecks(Schema.String, checks);
     }
@@ -203,33 +249,39 @@ const compileType = (type: FieldType): DynamicSchema => {
       if (type.maxItems !== undefined) {
         checks.push(Schema.isMaxLength(type.maxItems));
       }
-      return withChecks(Schema.Array(compileType(type.items)), checks);
+      return withChecks(Schema.Array(compileType(type.items, mode)), checks);
     }
     case "object":
-      return compileFields(type.fields);
+      return compileFields(type.fields, mode);
     case "nullable":
-      return Schema.NullOr(compileType(type.of));
+      return Schema.NullOr(compileType(type.of, mode));
     case "json":
       return Schema.Json;
   }
 };
 
-const compileFields = (fields: { readonly [name: string]: FieldType }): DynamicSchema => {
+const compileFields = (
+  fields: { readonly [name: string]: FieldType },
+  mode: Mode,
+): DynamicSchema => {
   const struct: Record<string, DynamicSchema | Schema.optionalKey<DynamicSchema>> = {};
   for (const [name, field] of Object.entries(fields)) {
-    const compiled = compileType(field);
+    const compiled = compileType(field, mode);
     struct[name] = field.optional === true ? Schema.optionalKey(compiled) : compiled;
   }
   return Schema.Struct(struct);
 };
 
 /** Compile a (checked) entity schema into an Effect Schema for validation and sampling. */
-export const compile = (schema: EntitySchema): DynamicSchema => compileFields(schema.fields);
+export const compile = (schema: EntitySchema, mode: Mode = "validate"): DynamicSchema =>
+  compileFields(schema.fields, mode);
 
 /** A compiled schema plus a validator that rejects unknown fields. */
 export interface CompiledSchema {
   readonly definition: EntitySchema;
   readonly schema: DynamicSchema;
+  /** The same schema with RegExp patterns, for generating sample documents. */
+  readonly sampling: () => DynamicSchema;
   /** Validate data, returning the decoded value or a readable message. */
   readonly validate: (data: unknown) => Result.Result<unknown, string>;
 }
@@ -240,6 +292,7 @@ export const compiled = (definition: EntitySchema): CompiledSchema => {
   return {
     definition,
     schema,
+    sampling: () => compile(definition, "sample"),
     validate: (data) =>
       Result.mapError(
         decode(data, { errors: "all", onExcessProperty: "error" }),

@@ -159,6 +159,13 @@ describe("entity HTTP API", () => {
       expect((yield* call("GET", "/api/types/nope")).body.code).toBe("TypeNotFound");
       expect((yield* call("GET", "/api/entities/nope")).status).toBe(404);
       expect((yield* call("GET", "/api/entities/x?version=abc")).status).toBe(400);
+      const deep = yield* call(
+        "POST",
+        "/api/types",
+        `{"name":"x","schema":${"[".repeat(100_000)}${"]".repeat(100_000)}}`,
+      );
+      expect(deep.status).toBe(400);
+      expect(deep.body.error).toMatch(/nest/);
 
       yield* call("POST", "/api/types", { name: "person", schema: personSchema });
       const missingVersion = yield* call("POST", "/api/types/person/entities", {

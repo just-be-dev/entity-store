@@ -63,13 +63,30 @@ describe("schema definitions", () => {
     ]);
   });
 
-  it("rejects patterns prone to catastrophic backtracking", () => {
+  it("validates patterns with the linear-time engine", () => {
     const check = (pattern: string) =>
       checkDefinition({ fields: { s: { type: "string", pattern } } }).map((i) => i.message);
-    expect(check("^(a+)+$")[0]).toMatch(/nests quantifiers/);
-    expect(check("^(\\w*x)*$")[0]).toMatch(/nests quantifiers/);
-    expect(check("^(ab|cd){2,}$")).toEqual([]);
-    expect(check("^[a-z]+(-[a-z]+)*$")).toEqual([]);
+    expect(check("^(a|a)+$")).toEqual([]);
+    expect(check("a(?=b)")[0]).toMatch(/Unsupported pattern/);
     expect(check("x".repeat(201))[0]).toMatch(/limited/);
+    const { validate } = compiled({ fields: { s: { type: "string", pattern: "^(a|a)+$" } } });
+    const started = performance.now();
+    expect(Result.isFailure(validate({ s: `${"a".repeat(10000)}!` }))).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(Result.isSuccess(validate({ s: "aaa" }))).toBe(true);
+  });
+
+  it("caps lower bounds that would make sample documents huge", () => {
+    const issues = checkDefinition({
+      fields: {
+        s: { type: "string", minLength: 5000 },
+        m: {
+          type: "array",
+          minItems: 50,
+          items: { type: "array", minItems: 50, items: { type: "string" } },
+        },
+      },
+    });
+    expect(issues.map((i) => i.path)).toEqual(["s", "m[]"]);
   });
 });

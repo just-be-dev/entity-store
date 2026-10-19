@@ -29,63 +29,109 @@ export const mergePatch = (target: Json, patch: Json): Json => {
   return out;
 };
 
-/** A change at an object path. A missing `value` removes the key. */
-export interface Change {
-  readonly path: ReadonlyArray<string>;
-  readonly value?: Json;
-}
+const MAX_ALIGN_CELLS = 250_000;
 
 /**
- * Structural diff between two documents. Objects are compared key by key;
- * arrays and scalars are replaced whole, because element positions don't
- * survive lens translation reliably.
+ * Carry an old writer's edit onto the stored document.
+ *
+ * `base` and `mine` are the writer's before and after documents, both lensed
+ * up to the stored version; `stored` is what's actually stored. The writer
+ * only changed what differs between `base` and `mine`, so everything else,
+ * including fields its version can't see, comes from `stored`.
+ *
+ * Objects merge key by key. Arrays are aligned element by element (longest
+ * common subsequence on `base` vs `mine`), so unchanged elements keep their
+ * stored form, edited elements merge recursively, and inserted elements come
+ * from `mine`. `base` must be `stored` lensed down and back up, so an array
+ * in `base` lines up index for index with the one in `stored`; if it doesn't,
+ * the writer's array wins outright.
  */
-export const diff = (
-  before: Json,
-  after: Json,
-  path: ReadonlyArray<string> = [],
-): Array<Change> => {
-  if (jsonEquals(before, after)) {
-    return [];
+export const merge3 = (base: Json, mine: Json, stored: Json): Json => {
+  if (jsonEquals(base, mine)) {
+    return stored;
   }
-  if (!isObject(before) || !isObject(after)) {
-    return [{ path, value: after }];
-  }
-  const changes: Array<Change> = [];
-  for (const key of Object.keys(before)) {
-    if (!Object.hasOwn(after, key)) {
-      changes.push({ path: [...path, key] });
+  if (isObject(base) && isObject(mine) && isObject(stored)) {
+    const out: Record<string, Json> = { ...stored };
+    for (const key of Object.keys(base)) {
+      if (!Object.hasOwn(mine, key)) {
+        delete out[key];
+      }
     }
-  }
-  for (const [key, value] of Object.entries(after)) {
-    if (Object.hasOwn(before, key)) {
-      changes.push(...diff(before[key] ?? null, value, [...path, key]));
-    } else {
-      changes.push({ path: [...path, key], value });
+    for (const [key, value] of Object.entries(mine)) {
+      const merged = Object.hasOwn(base, key)
+        ? merge3(
+            base[key] ?? null,
+            value,
+            Object.hasOwn(stored, key) ? (stored[key] ?? null) : value,
+          )
+        : value;
+      setOwn(out, key, merged);
     }
+    return out;
   }
-  return changes;
+  if (
+    Array.isArray(base) &&
+    Array.isArray(mine) &&
+    Array.isArray(stored) &&
+    base.length === stored.length
+  ) {
+    return mergeArrays(base, mine, stored);
+  }
+  return mine;
 };
 
-/**
- * Apply changes leniently: setting a path creates missing parent objects, and
- * removing a missing key is a no-op. The target may differ from the document
- * the diff came from, so strict JSON Patch semantics would reject good edits.
- */
-export const applyChanges = (doc: Json, changes: ReadonlyArray<Change>): Json =>
-  changes.reduce<Json>((acc, change) => applyChange(acc, change.path, change), doc);
-
-const applyChange = (doc: Json, path: ReadonlyArray<string>, change: Change): Json => {
-  const [head, ...rest] = path;
-  if (head === undefined) {
-    return change.value === undefined ? null : change.value;
+const mergeArrays = (
+  base: ReadonlyArray<Json>,
+  mine: ReadonlyArray<Json>,
+  stored: ReadonlyArray<Json>,
+): Json => {
+  if (base.length * mine.length > MAX_ALIGN_CELLS) {
+    return base.length === mine.length
+      ? mine.map((item, i) => merge3(base[i] ?? null, item, stored[i] ?? null))
+      : [...mine];
   }
-  const base: Record<string, Json> = isObject(doc) ? { ...doc } : {};
-  if (rest.length === 0 && change.value === undefined) {
-    delete base[head];
-    return base;
+  // Longest common subsequence of equal elements.
+  const rows = base.length + 1;
+  const cols = mine.length + 1;
+  const table = new Uint32Array(rows * cols);
+  for (let i = base.length - 1; i >= 0; i--) {
+    for (let j = mine.length - 1; j >= 0; j--) {
+      table[i * cols + j] = jsonEquals(base[i], mine[j])
+        ? (table[(i + 1) * cols + j + 1] ?? 0) + 1
+        : Math.max(table[(i + 1) * cols + j] ?? 0, table[i * cols + j + 1] ?? 0);
+    }
   }
-  const child = Object.hasOwn(base, head) ? (base[head] ?? null) : null;
-  setOwn(base, head, applyChange(child, rest, change));
-  return base;
+  const out: Array<Json> = [];
+  let i = 0;
+  let j = 0;
+  // Elements between matches: pair them up as edits, then extras are inserts.
+  const flushGap = (baseEnd: number, mineEnd: number) => {
+    const paired = Math.min(baseEnd - i, mineEnd - j);
+    for (let n = 0; n < paired; n++) {
+      out.push(merge3(base[i + n] ?? null, mine[j + n] ?? null, stored[i + n] ?? null));
+    }
+    for (let n = j + paired; n < mineEnd; n++) {
+      out.push(mine[n] ?? null);
+    }
+    i = baseEnd;
+    j = mineEnd;
+  };
+  let bi = 0;
+  let mj = 0;
+  while (bi < base.length && mj < mine.length) {
+    if (jsonEquals(base[bi], mine[mj])) {
+      flushGap(bi, mj);
+      out.push(stored[bi] ?? null);
+      bi++;
+      mj++;
+      i = bi;
+      j = mj;
+    } else if ((table[(bi + 1) * cols + mj] ?? 0) >= (table[bi * cols + mj + 1] ?? 0)) {
+      bi++;
+    } else {
+      mj++;
+    }
+  }
+  flushGap(base.length, mine.length);
+  return out;
 };

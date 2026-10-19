@@ -65,7 +65,7 @@ const runDirection = (
 };
 
 const sample = (schema: CompiledSchema, count: number, label: string) =>
-  Arbitrary.sampleEffect(Arbitrary.schema(schema.schema), { count, size: 8 }).pipe(
+  Arbitrary.sampleEffect(Arbitrary.schema(schema.sampling()), { count, size: 8 }).pipe(
     Effect.map((values) => ({ values: values as ReadonlyArray<unknown>, warning: undefined })),
     Effect.orElseSucceed(() => ({
       values: [] as ReadonlyArray<unknown>,

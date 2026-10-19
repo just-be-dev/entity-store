@@ -14,6 +14,34 @@ export const json = (body: unknown, status = 200) =>
 /** Request bodies are capped. Entity documents larger than this belong in object storage. */
 export const MAX_BODY_BYTES = 256 * 1024;
 
+/** Deeply nested JSON would overflow the stack in the decoder and in lenses. */
+const MAX_DEPTH = 64;
+
+/** Maximum bracket nesting in JSON text, skipping string contents. */
+const nestingDepth = (text: string): number => {
+  let depth = 0;
+  let max = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 92) {
+        i++;
+      } else if (c === 34) {
+        inString = false;
+      }
+    } else if (c === 34) {
+      inString = true;
+    } else if (c === 91 || c === 123) {
+      depth++;
+      max = Math.max(max, depth);
+    } else if (c === 93 || c === 125) {
+      depth--;
+    }
+  }
+  return max;
+};
+
 /** A request the HTTP layer rejects before it reaches an application operation. */
 export class BadRequest extends Schema.TaggedError<BadRequest>()("BadRequest", {
   status: Schema.Int,
@@ -33,6 +61,12 @@ export const body = <S extends Schema.Codec<any, unknown>>(schema: S) =>
     );
     if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
       return yield* new BadRequest({ status: 413, message: "Request body is too large" });
+    }
+    if (nestingDepth(text) > MAX_DEPTH) {
+      return yield* new BadRequest({
+        status: 400,
+        message: `JSON may nest at most ${MAX_DEPTH} levels`,
+      });
     }
     const decoded = Schema.decodeUnknownResult(Schema.fromJsonString(schema))(text, {
       errors: "all",

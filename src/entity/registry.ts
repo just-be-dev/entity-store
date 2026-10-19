@@ -146,10 +146,15 @@ export const makeRegistry = Effect.gen(function* () {
   ) {
     const lo = Math.min(from, to);
     const hi = Math.max(from, to);
+    // Collect into a local map: the shared cache may evict while we load.
+    const found = new Map<number, LoadedVersion>();
     const missing: Array<number> = [];
     for (let v = lo; v <= hi; v++) {
-      if (cache.get(type, v) === undefined) {
+      const cached = cache.get(type, v);
+      if (cached === undefined) {
         missing.push(v);
+      } else {
+        found.set(v, cached);
       }
     }
     if (missing.length > 0) {
@@ -164,12 +169,14 @@ export const makeRegistry = Effect.gen(function* () {
         )
         .pipe(Effect.mapError(storageFailure));
       for (const row of yield* decodeRows(VersionRow, "schema version")(rows)) {
-        cache.set(yield* toLoaded(row));
+        const loaded = yield* toLoaded(row);
+        cache.set(loaded);
+        found.set(loaded.info.version, loaded);
       }
     }
     const out: Array<LoadedVersion> = [];
     for (let v = lo; v <= hi; v++) {
-      const loaded = cache.get(type, v);
+      const loaded = found.get(v);
       if (loaded === undefined) {
         return yield* new VersionNotFound({ type, version: v });
       }

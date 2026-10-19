@@ -77,6 +77,17 @@ describe("lens expressions", () => {
       evaluate("s + s + s + s + s + s + s + s + s + s", { s: "x".repeat(200_000) }),
     ).toThrow(/work budget/);
     expect(evaluate("length(map(xs, a => a * 2))", { xs })).toBe(2000);
+    const zeros = Array.from({ length: 20000 }, () => 0);
+    expect(() => evaluate("length(filter(a, x => a == b))", { a: zeros, b: [...zeros] })).toThrow(
+      /work budget/,
+    );
+    expect(() =>
+      evaluate("length(filter(a, x => includes(b, 1)))", { a: zeros, b: zeros }),
+    ).toThrow(/work budget/);
+    expect(() => evaluate("length(replace(s, '', s))", { s: "x".repeat(15000) })).toThrow(
+      /work budget/,
+    );
+    expect(evaluate("replace(s, 'a', 'b')", { s: "a".repeat(100_000) })).toHaveLength(100_000);
   });
 
   it("reports syntax errors with positions", () => {
@@ -86,5 +97,7 @@ describe("lens expressions", () => {
     expect(parseError("split(a)")).toMatch(/takes 2 argument/);
     expect(parseError("map(xs, upper(x))")).toMatch(/expects a function/);
     expect(parseError("x".repeat(5000))).toMatch(/limited/);
+    expect(parseError(`${"(".repeat(1000)}1${")".repeat(1000)}`)).toMatch(/nest/);
+    expect(parseError(`${"!".repeat(1000)}x`)).toMatch(/nest/);
   });
 });

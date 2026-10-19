@@ -190,8 +190,11 @@ const BINARY_LEVELS: ReadonlyArray<ReadonlyArray<BinOp>> = [
 
 const LITERAL_IDENTS: Record<string, Json> = { true: true, false: false, null: null };
 
+const MAX_NESTING = 64;
+
 class Parser {
   private i = 0;
+  private depth = 0;
   constructor(private readonly tokens: ReadonlyArray<Token>) {}
 
   private peek(offset = 0): Token {
@@ -223,6 +226,21 @@ class Parser {
   }
 
   parseExpr(): Expr {
+    this.enter();
+    try {
+      return this.parseConditional();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private enter() {
+    if (++this.depth > MAX_NESTING) {
+      throw new ExprError(`Expressions may nest at most ${MAX_NESTING} levels`);
+    }
+  }
+
+  private parseConditional(): Expr {
     const c = this.parseBinary(0);
     if (this.isPunct("?")) {
       this.next();
@@ -255,7 +273,9 @@ class Parser {
   private parseUnary(): Expr {
     if (this.isPunct("!") || this.isPunct("-")) {
       const op = this.next();
+      this.enter();
       const e = this.parseUnary();
+      this.depth--;
       return { k: "unary", op: op.t === "punct" && op.v === "-" ? "-" : "!", e };
     }
     return this.parsePostfix();
@@ -414,7 +434,45 @@ const isObject = (v: Value): v is JsonObject =>
 
 const truthy = (v: Value) => !(v === undefined || v === null || v === false || v === 0 || v === "");
 
-export const jsonEquals = (a: Value, b: Value): boolean => {
+/**
+ * Work budget for one `run`. Every node evaluated costs 1, and every string or
+ * array produced costs its length, so nested `map`s or doubling concatenations
+ * over a large document fail fast instead of burning the Worker's CPU limit.
+ */
+const STEP_BUDGET = 1_000_000;
+let remaining = STEP_BUDGET;
+
+const charge = (cost: number) => {
+  remaining -= cost;
+  if (remaining < 0) {
+    throw new ExprError("Expression exceeded its work budget");
+  }
+};
+
+/** Join strings, paying for the result before it's allocated. */
+const joinCharged = (parts: ReadonlyArray<string>, separator: string): string => {
+  charge(
+    parts.reduce((n, part) => n + part.length, 0) +
+      separator.length * Math.max(0, parts.length - 1),
+  );
+  return parts.join(separator);
+};
+
+const sized = (value: Value): Value => {
+  if (typeof value === "string" || Array.isArray(value)) {
+    charge(value.length);
+  }
+  return value;
+};
+
+/** Deep equality on JSON values; `undefined` and `null` are equal. */
+export const jsonEquals = (a: Value, b: Value): boolean => equals(a, b, () => {});
+
+/** Deep equality that spends the work budget, for use inside expressions. */
+const chargedEquals = (a: Value, b: Value): boolean => equals(a, b, () => charge(1));
+
+const equals = (a: Value, b: Value, tick: () => void): boolean => {
+  tick();
   if (a === b) {
     return true;
   }
@@ -422,13 +480,13 @@ export const jsonEquals = (a: Value, b: Value): boolean => {
     return true;
   }
   if (Array.isArray(a) && Array.isArray(b)) {
-    return a.length === b.length && a.every((x, i) => jsonEquals(x, b[i]));
+    return a.length === b.length && a.every((x, i) => equals(x, b[i], tick));
   }
   if (isObject(a) && isObject(b)) {
     const ka = Object.keys(a).filter((k) => a[k] !== undefined);
     const kb = Object.keys(b).filter((k) => b[k] !== undefined);
     return (
-      ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && jsonEquals(a[k], b[k]))
+      ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && equals(a[k], b[k], tick))
     );
   }
   return false;
@@ -546,7 +604,7 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   first: builtin(1, 1, "First element", (fn, [v]) => sliceable(fn, v).at(0)),
   last: builtin(1, 1, "Last element", (fn, [v]) => sliceable(fn, v).at(-1)),
   includes: builtin(2, 2, "Whether a string/array contains a value", (fn, [v, x]) =>
-    typeof v === "string" ? v.includes(str(fn, x)) : arr(fn, v).some((y) => jsonEquals(y, x)),
+    typeof v === "string" ? v.includes(str(fn, x)) : arr(fn, v).some((y) => chargedEquals(y, x)),
   ),
   startsWith: builtin(2, 2, "String prefix test", (fn, [s, p]) =>
     str(fn, s).startsWith(str(fn, p)),
@@ -664,6 +722,7 @@ const add = (a: Value, b: Value): Value => {
     return finite(a + b);
   }
   if (Array.isArray(a) && Array.isArray(b)) {
+    charge(a.length + b.length);
     return [...a, ...b];
   }
   if (
@@ -671,31 +730,12 @@ const add = (a: Value, b: Value): Value => {
       (typeof b === "string" || typeof b === "number" || typeof b === "boolean")) ||
     (typeof b === "string" && (typeof a === "number" || typeof a === "boolean"))
   ) {
-    return String(a) + String(b);
+    const left = String(a);
+    const right = String(b);
+    charge(left.length + right.length);
+    return left + right;
   }
   throw new ExprError(`Can't add ${typeOf(a)} and ${typeOf(b)} (use ?? to supply a default)`);
-};
-
-/**
- * Work budget for one `run`. Every node evaluated costs 1, and every string or
- * array produced costs its length, so nested `map`s or doubling concatenations
- * over a large document fail fast instead of burning the Worker's CPU limit.
- */
-const STEP_BUDGET = 1_000_000;
-let remaining = STEP_BUDGET;
-
-const charge = (cost: number) => {
-  remaining -= cost;
-  if (remaining < 0) {
-    throw new ExprError("Expression exceeded its work budget");
-  }
-};
-
-const sized = (value: Value): Value => {
-  if (typeof value === "string" || Array.isArray(value)) {
-    charge(value.length);
-  }
-  return value;
 };
 
 const evaluate = (e: Expr, scope: Scope): Value => {
@@ -742,7 +782,7 @@ const evaluate = (e: Expr, scope: Scope): Value => {
       const r = evaluate(e.r, scope);
       switch (e.op) {
         case "+":
-          return sized(add(l, r));
+          return add(l, r);
         case "-":
           return finite(num("-", l) - num("-", r));
         case "*":
@@ -752,9 +792,9 @@ const evaluate = (e: Expr, scope: Scope): Value => {
         case "%":
           return finite(num("%", l) % num("%", r));
         case "==":
-          return jsonEquals(l, r);
+          return chargedEquals(l, r);
         case "!=":
-          return !jsonEquals(l, r);
+          return !chargedEquals(l, r);
         case "<":
         case "<=":
         case ">":

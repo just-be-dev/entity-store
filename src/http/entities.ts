@@ -62,7 +62,8 @@ const pathParam = (name: string) =>
     if (value === undefined || value === "") {
       return yield* new BadRequest({ status: 400, message: `Missing ${name}` });
     }
-    return decodeURIComponent(value);
+    // The router has already percent-decoded path parameters.
+    return value;
   });
 
 const route = <E extends StoreError | BadRequest, R>(
