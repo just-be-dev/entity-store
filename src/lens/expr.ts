@@ -581,13 +581,16 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
     str(fn, s).split(str(fn, sep)),
   ),
   join: builtin(1, 2, "Join an array of strings", (fn, [a, sep]) =>
-    arr(fn, a)
-      .map((x) => stringify(x) ?? "")
-      .join(sep === undefined ? "" : str(fn, sep)),
+    joinCharged(
+      arr(fn, a).map((x) => stringify(x) ?? ""),
+      sep === undefined ? "" : str(fn, sep),
+    ),
   ),
-  replace: builtin(3, 3, "Replace every occurrence of a substring", (fn, [s, find, repl]) =>
-    str(fn, s).split(str(fn, find)).join(str(fn, repl)),
-  ),
+  replace: builtin(3, 3, "Replace every occurrence of a substring", (fn, [s, find, repl]) => {
+    const parts = str(fn, s).split(str(fn, find));
+    charge(parts.length);
+    return joinCharged(parts, str(fn, repl));
+  }),
   slice: builtin(2, 3, "Slice a string or array", (fn, [v, start, end]) =>
     sliceable(fn, v).slice(num(fn, start), end === undefined ? undefined : num(fn, end)),
   ),
@@ -612,9 +615,13 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   endsWith: builtin(2, 2, "String suffix test", (fn, [s, p]) => str(fn, s).endsWith(str(fn, p))),
   concat: builtin(1, Infinity, "Concatenate strings or arrays", (fn, args) => {
     if (args.every((a) => Array.isArray(a))) {
+      charge(args.reduce((n, a) => n + arr(fn, a).length, 0));
       return args.flatMap((a) => arr(fn, a));
     }
-    return args.map((a) => stringify(a) ?? "").join("");
+    return joinCharged(
+      args.map((a) => stringify(a) ?? ""),
+      "",
+    );
   }),
   coalesce: builtin(1, Infinity, "First value that isn't null or absent", (_, args) =>
     args.find((a) => a !== undefined && a !== null),
