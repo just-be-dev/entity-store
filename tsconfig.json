@@ -28,6 +28,10 @@
             "options": { "allowedUnstableApis": ["effect/http"] }
           },
           {
+            "include": ["src/lens/check.ts"],
+            "options": { "allowedUnstableApis": ["effect/Arbitrary"] }
+          },
+          {
             "include": ["src/**/*.test.ts"],
             "options": { "allowedUnstableApis": ["@effect/vitest"] }
           },

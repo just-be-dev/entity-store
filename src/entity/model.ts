@@ -1,0 +1,200 @@
+import * as Schema from "effect/Schema";
+import { LensReport } from "../lens/check.ts";
+import { Lens } from "../lens/model.ts";
+import { EntitySchema, TypeName, Version } from "../schema/model.ts";
+
+// ─── IDs ────────────────────────────────────────────────────────────────────
+
+export const EntityId = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9_-]{1,128}$/, {
+    message: "Entity ids use letters, digits, '_' or '-' (max 128)",
+  }),
+).pipe(Schema.brand("EntityId"));
+export type EntityId = typeof EntityId.Type;
+
+export const Rev = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+
+// ─── Types and versions ─────────────────────────────────────────────────────
+
+export const Issue = Schema.Struct({ path: Schema.String, message: Schema.String });
+export type Issue = typeof Issue.Type;
+
+export const VersionInfo = Schema.Struct({
+  type: TypeName,
+  version: Version,
+  schema: EntitySchema,
+  /** Lens from `version - 1` to this version; absent for v1. */
+  lens: Schema.optionalKey(Lens),
+  note: Schema.String,
+  createdAt: Schema.Finite,
+});
+export type VersionInfo = typeof VersionInfo.Type;
+
+export const TypeSummary = Schema.Struct({
+  name: TypeName,
+  description: Schema.String,
+  latestVersion: Version,
+  createdAt: Schema.Finite,
+  updatedAt: Schema.Finite,
+});
+export type TypeSummary = typeof TypeSummary.Type;
+
+export const TypeInfo = Schema.Struct({
+  ...TypeSummary.fields,
+  versions: Schema.Array(VersionInfo),
+});
+export type TypeInfo = typeof TypeInfo.Type;
+
+// ─── Entities ───────────────────────────────────────────────────────────────
+
+export const Operation = Schema.Literals(["create", "replace", "patch", "delete"]);
+export type Operation = typeof Operation.Type;
+
+/** An entity as presented to a reader at a chosen schema version. */
+export const Entity = Schema.Struct({
+  id: EntityId,
+  type: TypeName,
+  /** The schema version `data` is presented in. */
+  version: Version,
+  /** The schema version `data` is stored at. */
+  storedVersion: Version,
+  rev: Rev,
+  data: Schema.Json,
+  createdAt: Schema.Finite,
+  updatedAt: Schema.Finite,
+});
+export type Entity = typeof Entity.Type;
+
+export const Revision = Schema.Struct({
+  rev: Rev,
+  op: Operation,
+  version: Version,
+  storedVersion: Version,
+  /** The schema version the writer used for this change. */
+  writerVersion: Version,
+  data: Schema.Json,
+  createdAt: Schema.Finite,
+});
+export type Revision = typeof Revision.Type;
+
+/** An entity that couldn't be shown at the requested version. */
+export const ProjectionFailure = Schema.Struct({
+  id: EntityId,
+  rev: Rev,
+  storedVersion: Version,
+  error: Schema.String,
+});
+
+export const EntityPage = Schema.Struct({
+  items: Schema.Array(Entity),
+  failures: Schema.Array(ProjectionFailure),
+  nextCursor: Schema.optionalKey(Schema.String),
+});
+export type EntityPage = typeof EntityPage.Type;
+
+export const HistoryPage = Schema.Struct({
+  id: EntityId,
+  type: TypeName,
+  items: Schema.Array(Revision),
+  failures: Schema.Array(Schema.Struct({ rev: Rev, error: Schema.String })),
+  nextBefore: Schema.optionalKey(Rev),
+});
+export type HistoryPage = typeof HistoryPage.Type;
+
+// ─── Errors ─────────────────────────────────────────────────────────────────
+
+export class TypeNotFound extends Schema.TaggedError<TypeNotFound>()("TypeNotFound", {
+  type: Schema.String,
+}) {}
+
+export class TypeAlreadyExists extends Schema.TaggedError<TypeAlreadyExists>()(
+  "TypeAlreadyExists",
+  { type: Schema.String },
+) {}
+
+export class VersionNotFound extends Schema.TaggedError<VersionNotFound>()("VersionNotFound", {
+  type: Schema.String,
+  version: Schema.Finite,
+}) {}
+
+/** Someone else added a version first; re-read the type and try again. */
+export class VersionConflict extends Schema.TaggedError<VersionConflict>()("VersionConflict", {
+  type: Schema.String,
+  expected: Schema.Finite,
+}) {}
+
+export class InvalidSchema extends Schema.TaggedError<InvalidSchema>()("InvalidSchema", {
+  issues: Schema.Array(Issue),
+}) {}
+
+export class InvalidLens extends Schema.TaggedError<InvalidLens>()("InvalidLens", {
+  issues: Schema.Array(Issue),
+}) {}
+
+export class LensCheckFailed extends Schema.TaggedError<LensCheckFailed>()("LensCheckFailed", {
+  report: LensReport,
+}) {}
+
+export class EntityNotFound extends Schema.TaggedError<EntityNotFound>()("EntityNotFound", {
+  id: Schema.String,
+}) {}
+
+export class EntityDeleted extends Schema.TaggedError<EntityDeleted>()("EntityDeleted", {
+  id: Schema.String,
+  rev: Schema.Finite,
+}) {}
+
+export class EntityAlreadyExists extends Schema.TaggedError<EntityAlreadyExists>()(
+  "EntityAlreadyExists",
+  { id: Schema.String },
+) {}
+
+export class RevisionNotFound extends Schema.TaggedError<RevisionNotFound>()(
+  "RevisionNotFound",
+  { id: Schema.String, rev: Schema.Finite },
+) {}
+
+/** The write was based on a stale revision. */
+export class RevConflict extends Schema.TaggedError<RevConflict>()("RevConflict", {
+  id: Schema.String,
+  expectedRev: Schema.Finite,
+  currentRev: Schema.Finite,
+}) {}
+
+export class ValidationFailed extends Schema.TaggedError<ValidationFailed>()(
+  "ValidationFailed",
+  { type: Schema.String, version: Schema.Finite, message: Schema.String },
+) {}
+
+/** A lens couldn't move data between versions, or its output didn't fit the target schema. */
+export class ProjectionFailed extends Schema.TaggedError<ProjectionFailed>()(
+  "ProjectionFailed",
+  {
+    type: Schema.String,
+    from: Schema.Finite,
+    to: Schema.Finite,
+    message: Schema.String,
+  },
+) {}
+
+/** Storage misbehaved or returned data that no longer decodes. */
+export class StorageFailure extends Schema.TaggedError<StorageFailure>()("StorageFailure", {
+  message: Schema.String,
+}) {}
+
+export type StoreError =
+  | TypeNotFound
+  | TypeAlreadyExists
+  | VersionNotFound
+  | VersionConflict
+  | InvalidSchema
+  | InvalidLens
+  | LensCheckFailed
+  | EntityNotFound
+  | EntityDeleted
+  | EntityAlreadyExists
+  | RevisionNotFound
+  | RevConflict
+  | ValidationFailed
+  | ProjectionFailed
+  | StorageFailure;
