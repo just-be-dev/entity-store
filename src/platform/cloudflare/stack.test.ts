@@ -17,7 +17,7 @@ const platform = {
 it.effect("defaults to the starter stack at / with no route", () =>
   Effect.gen(function* () {
     const settings = yield* read({});
-    expect(settings.stackName).toBe("project-starter");
+    expect(settings.stackName).toBe("entity-store");
     expect(settings.basePath).toBe("/");
     expect(Option.isNone(settings.prodRoute)).toBe(true);
   }),
@@ -26,7 +26,7 @@ it.effect("defaults to the starter stack at / with no route", () =>
 it.effect("treats blank variables as unset", () =>
   Effect.gen(function* () {
     const settings = yield* read({ PROJECT_NAME: "  ", STAGE: "" });
-    expect(settings.stackName).toBe("project-starter");
+    expect(settings.stackName).toBe("entity-store");
   }),
 );
 

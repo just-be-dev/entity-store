@@ -1,51 +1,70 @@
-# Effect · Cloudflare · Foldkit template
+# Entity store
 
-A starter for TypeScript apps on Cloudflare, built with Effect 4, Foldkit, Bun, mise, and Alchemy v2.
+A schema-versioned entity store on Cloudflare D1, built with Effect 4, Foldkit, and Alchemy v2 (from the [cafe-stack](https://github.com/just-be-dev/cafe-stack) template).
 
-It comes with a Foldkit counter page, a small Effect service, a `GET /api/health` route, and an Alchemy stack with two Workers: a Website that serves the UI and an API. Both Workers send logs and traces to Workers Observability, and the API's Effect spans show up in Cloudflare's trace view.
+- **One table for every entity.** Entities of all types live in `entities` as JSON, tagged with their type and the schema version they're stored at.
+- **Schemas are data.** Entity types and their schemas are created through the UI or API, as JSON, with no code deploy or migration. They compile to Effect Schema at runtime.
+- **Versioned schemas with lenses.** A new schema version carries a lens from the previous one: a list of bidirectional ops (`rename`, `add`, `convert`, `hoist`, `derive`, …) with a small, pure expression language for computed fields. Lenses are data too, authored in the UI.
+- **Lenses run at read time.** Data stays at the version it was written in and is lensed to whichever version a reader asks for. Old writers keep working: their edits are translated forward without clobbering fields they can't see.
+- **Checked lenses.** Before a version is saved, its lens is property-checked against random documents of both schemas and against stored data, with counterexamples shown in the UI.
+- **History on every write.** Each write appends a snapshot revision in the same D1 transaction, for 2 rows written per edit, with optimistic concurrency on `rev`.
 
 ```sh
 mise trust && mise install
 mise run check
-mise run build
 mise run dev
 ```
 
-`mise run dev` prints a Website URL. The UI is served there, and `/api/*` is forwarded to the API Worker, which also has its own workers.dev URL. `GET /api/health` returns `{ "name": "Project starter", "status": "ok" }`. Unknown API routes return a JSON 404.
+`mise run dev` prints a Website URL with the UI; the API is at `<url>/api/*`. See [docs/api.md](docs/api.md) for routes and [docs/data-model.md](docs/data-model.md) for the storage layout, schema language, lens ops, and expression language.
+
+## Example
+
+```sh
+# v1: first and last names
+curl -X POST $URL/api/types -d '{"name":"person","schema":{"fields":{
+  "firstName":{"type":"string"},"lastName":{"type":"string"}}}}'
+curl -X POST $URL/api/types/person/entities -d '{"id":"ada","version":1,
+  "data":{"firstName":"Ada","lastName":"Lovelace"}}'
+
+# v2: one name field, plus an optional age. The lens is data.
+curl -X POST $URL/api/types/person/versions -d '{
+  "schema":{"fields":{"fullName":{"type":"string"},"age":{"type":"number","optional":true}}},
+  "lens":{"ops":[
+    {"op":"derive",
+     "forward":{"fullName":"firstName + \" \" + lastName"},
+     "backward":{"firstName":"split(fullName, \" \")[0]",
+                 "lastName":"join(slice(split(fullName, \" \"), 1), \" \")"}},
+    {"op":"add","field":"age"}]}}'
+
+curl $URL/api/entities/ada            # {"version":2,"storedVersion":1,"data":{"fullName":"Ada Lovelace"}}
+curl "$URL/api/entities/ada?version=1" # still readable as v1
+curl $URL/api/entities/ada/history
+```
+
+The version is saved only if the lens check passes. Had v1 required `minLength: 1` names, the check would reject this lens with a counterexample such as `{"fullName":"x"}` → `{"firstName":"x","lastName":""}`. It also warns that names containing extra spaces don't round-trip exactly.
 
 ## Layout
 
 ```text
-alchemy.run.ts                   re-exports the platform stack
+migrations/0001_entity_store.sql  D1 tables: entity_types, schema_versions, entities, entity_revisions
 src/
-  model.ts / service.ts          portable Schema and Effect service
-  api.ts / api.test.ts           routes and HTTP contract tests
-  platform/
-    boundary.test.ts             keeps platform imports out of domain code
-    cloudflare/{stack,api,edge}.ts  resources, API Worker, forwarding edge
-  ui/
-    entry.ts                     runtime boot
-    main.ts                      Model, Messages, init, update, view
-    styles.css                   light/dark Tailwind theme
-    components/ui/               foldcn badge, bubble, button, empty,
-                                 input, message, and textarea
-    lib/utils.ts                 `cn` class helper
-    story.test.ts / scene.test.ts  update and view tests
-    AGENTS.md                    Foldkit conventions
+  schema/                         schema-as-data model and compiler to Effect Schema
+  lens/                           lens ops, expression language, lens property check
+  entity/                         EntityStore application, SqlDatabase port, patch/diff
+  http/                           routes, body limits, error mapping
+  api.ts                          route composition
+  testing/                        node:sqlite SqlDatabase for tests
+  platform/cloudflare/
+    database.ts / d1.ts           D1 declaration and SqlDatabase adapter
+    api.ts / stack.ts / edge.ts   API Worker, Alchemy stack, Website forwarding
+  ui/                             Foldkit UI
 ```
 
-Root files configure Bun, mise, Node.js, TypeScript, Vite, Vitest with `@effect/vitest`, Oxlint/Oxfmt, foldcn, the Foldkit DevTools MCP server, and dependency patches.
+## Not done yet
 
-## Starting a new project
-
-1. Click **Use this template → Create a new repository** and pick the new repository's visibility.
-2. Decide on the product's domain names, who owns which data, how users authenticate, and whether you need D1, Durable Objects, or AI.
-3. Rename things: `name` in `package.json`, the `project-starter` stack name in `src/platform/cloudflare/stack.ts`, the app name in `src/platform/cloudflare/api.ts`, and the page title and content in `index.html` and `src/ui/`. Resource names stick once deployed, so settle them before the first deploy.
-4. Run `mise trust && mise install`. It installs Bun, Node.js for Vitest, and the locked dependencies. Commit `bun.lock`. Read the [tooling guide](docs/tooling.md) before upgrading dependencies.
-5. Replace the sample service and counter with your first real feature. Keep Cloudflare code in `src/platform/cloudflare/` and runtime boot in `src/ui/entry.ts`.
-6. Add your product's invariants to `AGENTS.md`, rewrite this README, and run the [checks](docs/guardrails.md).
-
-A prompt for an agent: "Read AGENTS.md and docs/. Adapt this starter for an application that does [product description]. Keep the stack and boundaries. Build one useful vertical slice and verify it locally. Do not deploy."
+- **No authentication.** Both Workers are public. Anyone who can reach the URL can create types, versions, and entities. Add identity and authorization covering both entry points before deploying anywhere shared.
+- No filtering beyond listing by type. Querying by field across versions needs a design (fields can be renamed between versions); `json_extract` expression indexes per version are the likely route.
+- Deletes are soft (tombstone plus a `delete` revision). There's no restore or purge yet.
 
 ## Deploying
 
@@ -55,7 +74,7 @@ Both Workers are public. The API answers on its workers.dev URL and through the 
 
 ### Environment variables
 
-All of these are optional. With none set, the stack is named `project-starter`, the app is served from `/`, and there are no custom routes.
+All of these are optional. With none set, the stack is named `entity-store`, the app is served from `/`, and there are no custom routes.
 
 | Variable       | Effect                                                                                                 |
 | -------------- | ------------------------------------------------------------------------------------------------------ |
@@ -79,6 +98,8 @@ After a deploy, request `/api/health` and open **Workers & Pages → App / Api �
 
 | Guide                                     | Covers                                                  |
 | ----------------------------------------- | ------------------------------------------------------- |
+| [Data model](docs/data-model.md)          | Storage layout, schema language, lenses, write rules    |
+| [HTTP API](docs/api.md)                   | Routes, payloads, and error codes                       |
 | [Organization](docs/organization.md)      | Where code goes as the project grows                    |
 | [Architecture](docs/architecture.md)      | Domains, services and layers, lifetimes, transactions   |
 | [Tooling](docs/tooling.md)                | Pinned versions, config files, commands, patches, AI    |

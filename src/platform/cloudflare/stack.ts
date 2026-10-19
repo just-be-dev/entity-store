@@ -21,7 +21,7 @@ const optional = (name: string) =>
 
 /**
  * Optional deploy settings, read at plan time. With none set, the stack is
- * `project-starter`, served from `/`, with no custom routes.
+ * `entity-store`, served from `/`, with no custom routes.
  *
  * - PROJECT_NAME  names the stack, so each project keeps its own Alchemy state.
  * - BASE_PATH     serves the app under a path prefix, e.g. `/<project>/`.
@@ -36,7 +36,7 @@ export const DeployConfig = Config.all({
   zone: optional("PROJECT_ZONE"),
 }).pipe(
   Config.map(({ project, basePath, stage, host, zone }) => ({
-    stackName: Option.getOrElse(project, () => "project-starter"),
+    stackName: Option.getOrElse(project, () => "entity-store"),
     basePath,
     prodRoute: Option.all({ project, host, zone }).pipe(
       Option.filter(() => Option.contains(stage, "prod")),
