@@ -4,7 +4,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Random from "effect/Random";
 import * as Result from "effect/Result";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type { Json, JsonObject } from "../lens/expr.ts";
 import { compileLens } from "../lens/apply.ts";
