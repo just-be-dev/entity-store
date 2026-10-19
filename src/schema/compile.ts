@@ -11,6 +11,31 @@ export interface DefinitionIssue {
 }
 
 const MAX_DEPTH = 10;
+const MAX_PATTERN = 200;
+
+/**
+ * Patterns run on every write. Reject the classic catastrophic-backtracking
+ * shape: a repeated group whose body starts with a quantified atom (`(a+)+`,
+ * `(\\w*x)*`), so each repetition can steal input from the last. Separated
+ * repeats like `[a-z]+(-[a-z]+)*` stay allowed. It's a heuristic, not a proof.
+ */
+const GROUP_STARTS_QUANTIFIED = /\((?:\?:)?(?:\\.|\[(?:\\.|[^\]\\])*\]|[^()|\\])[*+{]/;
+const REPEATED_GROUP = /\)(?:[*+]|\{\d*,)/;
+
+const patternProblem = (pattern: string): string | undefined => {
+  if (pattern.length > MAX_PATTERN) {
+    return `Patterns are limited to ${MAX_PATTERN} characters`;
+  }
+  try {
+    new RegExp(pattern, "u");
+  } catch {
+    return `Invalid pattern: ${pattern}`;
+  }
+  if (GROUP_STARTS_QUANTIFIED.test(pattern) && REPEATED_GROUP.test(pattern)) {
+    return "Pattern nests quantifiers (like (a+)+), which can backtrack catastrophically";
+  }
+  return undefined;
+};
 const MAX_FIELDS = 500;
 
 /**
@@ -57,10 +82,9 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
           issues.push({ path, message: "minLength is greater than maxLength" });
         }
         if (type.pattern !== undefined) {
-          try {
-            new RegExp(type.pattern, "u");
-          } catch {
-            issues.push({ path, message: `Invalid pattern: ${type.pattern}` });
+          const problem = patternProblem(type.pattern);
+          if (problem !== undefined) {
+            issues.push({ path, message: problem });
           }
         }
         return;

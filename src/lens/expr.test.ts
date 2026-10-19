@@ -70,6 +70,15 @@ describe("lens expressions", () => {
     expect(parseError("toString()")).toMatch(/Unknown function/);
   });
 
+  it("stops runaway work instead of exhausting the Worker", () => {
+    const xs = Array.from({ length: 2000 }, (_, i) => i);
+    expect(() => evaluate("map(xs, a => map(xs, b => a + b))", { xs })).toThrow(/work budget/);
+    expect(() =>
+      evaluate("s + s + s + s + s + s + s + s + s + s", { s: "x".repeat(200_000) }),
+    ).toThrow(/work budget/);
+    expect(evaluate("length(map(xs, a => a * 2))", { xs })).toBe(2000);
+  });
+
   it("reports syntax errors with positions", () => {
     expect(parseError("a +")).toMatch(/Unexpected end/);
     expect(parseError("'open")).toMatch(/Unterminated string/);

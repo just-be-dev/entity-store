@@ -676,7 +676,30 @@ const add = (a: Value, b: Value): Value => {
   throw new ExprError(`Can't add ${typeOf(a)} and ${typeOf(b)} (use ?? to supply a default)`);
 };
 
+/**
+ * Work budget for one `run`. Every node evaluated costs 1, and every string or
+ * array produced costs its length, so nested `map`s or doubling concatenations
+ * over a large document fail fast instead of burning the Worker's CPU limit.
+ */
+const STEP_BUDGET = 1_000_000;
+let remaining = STEP_BUDGET;
+
+const charge = (cost: number) => {
+  remaining -= cost;
+  if (remaining < 0) {
+    throw new ExprError("Expression exceeded its work budget");
+  }
+};
+
+const sized = (value: Value): Value => {
+  if (typeof value === "string" || Array.isArray(value)) {
+    charge(value.length);
+  }
+  return value;
+};
+
 const evaluate = (e: Expr, scope: Scope): Value => {
+  charge(1);
   switch (e.k) {
     case "lit":
       return e.v;
@@ -719,7 +742,7 @@ const evaluate = (e: Expr, scope: Scope): Value => {
       const r = evaluate(e.r, scope);
       switch (e.op) {
         case "+":
-          return add(l, r);
+          return sized(add(l, r));
         case "-":
           return finite(num("-", l) - num("-", r));
         case "*":
@@ -758,13 +781,18 @@ const evaluate = (e: Expr, scope: Scope): Value => {
           args.push(evaluate(arg, scope));
         }
       }
-      return fn.call(e.fn, args, lambda);
+      return sized(fn.call(e.fn, args, lambda));
     }
   }
 };
 
 /** Evaluate a parsed expression against a document. Throws {@link ExprError}. */
-export const run = (e: Expr, doc: Value): Value => evaluate(e, { doc, locals: new Map() });
+export const run = (e: Expr, doc: Value): Value => {
+  // NOTE: evaluation is synchronous, so a module-level budget can't be shared
+  // between concurrent runs.
+  remaining = STEP_BUDGET;
+  return evaluate(e, { doc, locals: new Map() });
+};
 
 /** Field names referenced at the top level of the document (best effort, for docs/UI). */
 export const freeVariables = (
