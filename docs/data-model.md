@@ -72,6 +72,13 @@ An entity schema is JSON. The root is always an object:
 | `json`     | any JSON value                                                                         |
 
 Every node accepts `description`; object fields accept `optional: true`.
+
+`pattern` runs on every write and read, so it's matched by a linear-time engine
+(`src/schema/regex.ts`) rather than backtracking `RegExp`: literals, `.`,
+classes, `\d \w \s`, `^ $`, groups, `|`, and `* + ? {n,m}` (repeat counts up
+to 100). Backreferences, lookaround, and `\b` are rejected. Lower bounds are
+capped (`minLength` ≤ 1000, `minItems` ≤ 100) because the lens check generates
+documents that satisfy them.
 Field names are identifiers so lens expressions can refer to them. Writes
 reject unknown fields. The schema compiles to an Effect Schema at runtime
 (`src/schema/compile.ts`), which validates writes, validates lens output, and
@@ -126,6 +133,7 @@ is safe to run in the API Worker on every read (`src/lens/expr.ts`):
 - Operators: `.field`, `[index]`, `! -`, `* / %`, `+ -` (numbers, string concatenation, array concatenation), `< <= > >=`, `== !=` (deep equality), `&& ||`, `??`, `cond ? a : b`.
 - Functions: `string number int boolean lower upper trim split join replace slice length at first last includes startsWith endsWith concat coalesce exists typeOf round floor ceil abs min max keys values pick omit merge`, plus `map(xs, x => …)` and `filter(xs, x => …)`. `GET /api/lens/functions` lists them.
 - Type mismatches (`'a' + missing`, `1 / 0`) are errors, not `NaN` or `"undefined"`.
+- Each evaluation has a work budget (nodes visited plus the size of strings and arrays built), so a hostile lens fails with an error instead of exhausting the Worker. Expressions are limited to 4000 characters and 64 levels of nesting; request JSON to 64 levels.
 
 ### Checking a lens
 
@@ -149,10 +157,13 @@ schema and then:
   Entities migrate forward as they're edited, so read-time lensing shrinks
   over time.
 - **Writer older than the stored version:** the store lenses the writer's
-  before and after documents up to the stored version, diffs them, and applies
-  only that diff to the stored data. Fields the old writer can't see (like
-  `age` added in v2) survive its edits. If the result isn't valid at the
-  stored version, the write fails with `ValidationFailed`.
+  before and after documents up to the stored version and three-way merges
+  that change onto the stored data (`merge3` in `src/entity/patch.ts`).
+  Objects merge key by key; arrays are aligned element by element, so
+  unchanged and edited elements keep fields the old writer can't see (like
+  `age` added in v2), while inserted elements get the lens defaults. If the
+  result isn't valid at the stored version, the write fails with
+  `ValidationFailed`.
 
 History snapshots are stored at their own version and lensed on read, so any
 past revision can be viewed in any version.
