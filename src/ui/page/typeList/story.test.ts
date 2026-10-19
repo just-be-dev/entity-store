@@ -23,6 +23,8 @@ const failure = (error: string, code: string) =>
     issues: [{ path: "fields.x", message: "Unknown field type" }],
     report: Option.none(),
     currentRev: Option.none(),
+    problems: [],
+    linkedFrom: [],
   });
 
 describe("type list", () => {

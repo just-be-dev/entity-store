@@ -23,7 +23,7 @@ describe("root", () => {
 
     const entity = init(url("/entities/ada"));
     expect(entity.model.page._tag).toBe("EntityDetail");
-    expect(entity.commands).toHaveLength(2);
+    expect(entity.commands).toHaveLength(3);
 
     expect(init(url("/nowhere")).model.page).toEqual(Page.NotFound({ path: "/nowhere" }));
   });

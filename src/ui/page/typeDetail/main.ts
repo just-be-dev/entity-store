@@ -24,11 +24,14 @@ import {
   ApiFailure,
   Entity,
   EntityPage,
+  Included,
   ProjectionFailure,
   TypeInfo,
   type VersionInfo,
 } from "@/domain/entityStore";
 import { compactJson, exampleDocument, parseJson, prettyJson } from "@/domain/json";
+import { linkedTypes, type OutgoingLink, outgoingLinks } from "@/domain/links";
+import { entityLink, preview } from "@/components/links";
 import { formatTime, plural } from "@/lib/format";
 import { AppRoute, href } from "@/route";
 
@@ -55,6 +58,7 @@ export const Entities = defineTaggedUnion({
   Loaded: {
     version: Schema.Int,
     items: Schema.Array(Entity),
+    included: Included,
     failures: Schema.Array(ProjectionFailure),
     nextCursor: Schema.Option(Schema.String),
     more: More,
@@ -120,6 +124,7 @@ const entitiesUrl = (name: string, version: number, cursor: Option.Option<string
   apiUrl(`types/${segment(name)}/entities`, {
     version: `${version}`,
     limit: "50",
+    include: "links",
     ...Option.match(cursor, { onNone: () => ({}), onSome: (value) => ({ cursor: value }) }),
   });
 
@@ -252,6 +257,7 @@ export const update = (model: Model, message: Message) =>
                   version,
                   items: page.items,
                   failures: page.failures,
+                  included: page.included ?? {},
                   nextCursor: page.nextCursor,
                   more: More.Idle(),
                 }),
@@ -293,6 +299,7 @@ export const update = (model: Model, message: Message) =>
                 version,
                 items: Array.appendAll(loaded.items, page.items),
                 failures: Array.appendAll(loaded.failures, page.failures),
+                included: { ...loaded.included, ...page.included },
                 nextCursor: page.nextCursor,
                 more: More.Idle(),
               }),
@@ -385,6 +392,14 @@ const versionItem = (info: VersionInfo, h: HtmlBuilder<Message>): Html =>
                 [h.Class("min-w-0 flex-1 truncate")],
                 [info.note || (info.version === 1 ? "Initial schema" : "No note")],
               ),
+              Array.match(linkedTypes(info.schema), {
+                onEmpty: () => h.empty,
+                onNonEmpty: (types) =>
+                  h.span(
+                    [h.Class("font-mono text-xs text-muted-foreground")],
+                    [`links → ${types.join(", ")}`],
+                  ),
+              }),
               h.span(
                 [h.Class("font-mono text-xs text-muted-foreground")],
                 [formatTime(info.createdAt)],
@@ -445,7 +460,40 @@ const versionsView = (info: TypeInfo, h: HtmlBuilder<Message>): Html =>
     h,
   );
 
-const entityRow = (entity: Entity, h: HtmlBuilder<Message>): Html =>
+const linkChips = (
+  links: ReadonlyArray<OutgoingLink>,
+  included: Included,
+  h: HtmlBuilder<Message>,
+): Html =>
+  Array.match(links, {
+    onEmpty: () => h.empty,
+    onNonEmpty: (nonEmpty) =>
+      h.ul(
+        [h.Class("mt-1 flex flex-wrap gap-x-3 gap-y-0.5"), h.AriaLabel("Links")],
+        Array.map(nonEmpty, (link) =>
+          h.keyed("li")(
+            `${link.path}:${link.target}`,
+            [h.Class("flex items-baseline gap-1 text-xs")],
+            [
+              h.span([h.Class("font-mono text-muted-foreground")], [`${link.path} →`]),
+              entityLink(link.target, h, {
+                title: Option.match(Option.fromNullishOr(included[link.target]), {
+                  onNone: () => `${link.targetType} not found`,
+                  onSome: (target) => `${target.type}: ${preview(target)}`,
+                }),
+              }),
+            ],
+          ),
+        ),
+      ),
+  });
+
+const entityRow = (
+  entity: Entity,
+  schema: Option.Option<VersionInfo>,
+  included: Included,
+  h: HtmlBuilder<Message>,
+): Html =>
   h.keyed("tr")(
     entity.id,
     [h.Class("border-t border-border align-top")],
@@ -473,6 +521,14 @@ const entityRow = (entity: Entity, h: HtmlBuilder<Message>): Html =>
               h.Title(compactJson(entity.data)),
             ],
             [compactJson(entity.data)],
+          ),
+          linkChips(
+            Option.match(schema, {
+              onNone: () => [],
+              onSome: (version) => outgoingLinks(version.schema, entity.data),
+            }),
+            included,
+            h,
           ),
         ],
       ),
@@ -547,7 +603,12 @@ const moreView = (nextCursor: Option.Option<string>, more: More, h: HtmlBuilder<
       ),
   });
 
-const entitiesTable = (items: ReadonlyArray<Entity>, h: HtmlBuilder<Message>): Html =>
+const entitiesTable = (
+  items: ReadonlyArray<Entity>,
+  schema: Option.Option<VersionInfo>,
+  included: Included,
+  h: HtmlBuilder<Message>,
+): Html =>
   Array.match(items, {
     onEmpty: () =>
       Empty(
@@ -591,7 +652,7 @@ const entitiesTable = (items: ReadonlyArray<Entity>, h: HtmlBuilder<Message>): H
               ),
               h.tbody(
                 [],
-                Array.map(entities, (entity) => entityRow(entity, h)),
+                Array.map(entities, (entity) => entityRow(entity, schema, included, h)),
               ),
             ],
           ),
@@ -621,10 +682,14 @@ const entitiesView = (model: Model, info: TypeInfo, h: HtmlBuilder<Message>): Ht
         Idle: () => h.empty,
         Loading: () => statusText("Loading entities…", h),
         Failed: ({ failure }) => failureAlert(failure, h),
-        Loaded: ({ items, failures, nextCursor, more }) =>
+        Loaded: ({ version, items, failures, nextCursor, more, included }) =>
           h.div(
             [h.Class("space-y-3")],
-            [entitiesTable(items, h), failuresView(failures, h), moreView(nextCursor, more, h)],
+            [
+              entitiesTable(items, versionInfo(model, version), included, h),
+              failuresView(failures, h),
+              moreView(nextCursor, more, h),
+            ],
           ),
       }),
     ],

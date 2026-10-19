@@ -2,7 +2,8 @@ import * as Array from "effect/Array";
 import * as Option from "effect/Option";
 import type { Html, HtmlBuilder } from "foldkit/html";
 import { badge } from "@/components/ui/badge";
-import type { ApiFailure, Issue } from "@/domain/entityStore";
+import { entityLink } from "@/components/links";
+import type { ApiFailure, Backlink, Issue, LinkProblem } from "@/domain/entityStore";
 
 const alertClass =
   "rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive";
@@ -33,7 +34,53 @@ export const issueList = <M>(issues: ReadonlyArray<Issue>, h: HtmlBuilder<M>): H
       ),
   });
 
-/** An API failure: its message, error code, and any located issues. */
+const problemList = <M>(problems: ReadonlyArray<LinkProblem>, h: HtmlBuilder<M>): Html =>
+  Array.match(problems, {
+    onEmpty: () => h.empty,
+    onNonEmpty: (nonEmpty) =>
+      h.ul(
+        [h.Class("mt-2 space-y-1 text-xs"), h.AriaLabel("Invalid links")],
+        Array.map(nonEmpty, (problem) =>
+          h.keyed("li")(
+            `${problem.path}:${problem.target}`,
+            [h.Class("flex flex-wrap gap-x-2")],
+            [
+              h.code([h.Class("font-mono font-semibold")], [problem.path]),
+              h.span([], ["→"]),
+              h.code([h.Class("font-mono")], [problem.target]),
+              h.span([], [problem.message]),
+            ],
+          ),
+        ),
+      ),
+  });
+
+const linkedFromList = <M>(linkedFrom: ReadonlyArray<Backlink>, h: HtmlBuilder<M>): Html =>
+  Array.match(linkedFrom, {
+    onEmpty: () => h.empty,
+    onNonEmpty: (nonEmpty) =>
+      h.div(
+        [h.Class("mt-2 text-xs")],
+        [
+          h.p([], ["Can't delete: linked from"]),
+          h.ul(
+            [h.Class("mt-1 space-y-1"), h.AriaLabel("Linked from")],
+            Array.map(nonEmpty, (backlink) =>
+              h.keyed("li")(
+                `${backlink.source}:${backlink.path}`,
+                [h.Class("flex flex-wrap items-center gap-x-2")],
+                [
+                  entityLink(backlink.source, h, { className: "text-destructive underline" }),
+                  h.span([], [`(${backlink.type}, at ${backlink.path})`]),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+  });
+
+/** An API failure: its message, error code, and any located issues or link details. */
 export const failureAlert = <M>(failure: ApiFailure, h: HtmlBuilder<M>): Html =>
   h.div(
     [h.Class(alertClass), h.Role("alert")],
@@ -49,6 +96,8 @@ export const failureAlert = <M>(failure: ApiFailure, h: HtmlBuilder<M>): Html =>
         ],
       ),
       issueList(failure.issues, h),
+      problemList(failure.problems, h),
+      linkedFromList(failure.linkedFrom, h),
     ],
   );
 

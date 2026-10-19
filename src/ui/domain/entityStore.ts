@@ -46,6 +46,38 @@ export const Entity = Schema.Struct({
 });
 export type Entity = typeof Entity.Type;
 
+/** Entities linked from the returned data, keyed by id (`?include=links`). */
+export const Included = Schema.Record(Schema.String, Entity);
+export type Included = typeof Included.Type;
+
+/** An entity read with `?include=links`. */
+export const EntityWithLinks = Schema.Struct({
+  ...Entity.fields,
+  included: Schema.optionalKey(Included),
+});
+
+/** An entity that links to another, and the field path (in its stored version) holding the link. */
+export const Backlink = Schema.Struct({
+  source: Schema.String,
+  type: Schema.String,
+  path: Schema.String,
+});
+export type Backlink = typeof Backlink.Type;
+
+export const BacklinkPage = Schema.Struct({
+  items: Schema.Array(Backlink),
+  nextCursor: Schema.OptionFromOptionalKey(Schema.String),
+});
+export type BacklinkPage = typeof BacklinkPage.Type;
+
+/** A link in a write that points at a missing, deleted, or wrong-type entity. */
+export const LinkProblem = Schema.Struct({
+  path: Schema.String,
+  target: Schema.String,
+  message: Schema.String,
+});
+export type LinkProblem = typeof LinkProblem.Type;
+
 export const ProjectionFailure = Schema.Struct({
   id: Schema.String,
   rev: Schema.Int,
@@ -58,6 +90,7 @@ export const EntityPage = Schema.Struct({
   items: Schema.Array(Entity),
   failures: Schema.Array(ProjectionFailure),
   nextCursor: Schema.OptionFromOptionalKey(Schema.String),
+  included: Schema.optionalKey(Included),
 });
 export type EntityPage = typeof EntityPage.Type;
 
@@ -165,6 +198,8 @@ export const ApiFailure = Schema.Struct({
   issues: Schema.Array(Issue),
   report: Schema.Option(LensReport),
   currentRev: Schema.Option(Schema.Int),
+  problems: Schema.Array(LinkProblem),
+  linkedFrom: Schema.Array(Backlink),
 });
 export type ApiFailure = typeof ApiFailure.Type;
 
@@ -175,4 +210,6 @@ export const ErrorBody = Schema.Struct({
   issues: Schema.optionalKey(Schema.Array(Issue)),
   report: Schema.OptionFromOptionalKey(LensReport),
   currentRev: Schema.OptionFromOptionalKey(Schema.Int),
+  problems: Schema.optionalKey(Schema.Array(LinkProblem)),
+  linkedFrom: Schema.optionalKey(Schema.Array(Backlink)),
 });

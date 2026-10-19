@@ -88,6 +88,34 @@ describe("type detail", () => {
     );
   });
 
+  it("merges linked entities across pages", () => {
+    const first = update(
+      loaded,
+      Message.SucceededFetchEntities({
+        version: 2,
+        page: { ...page(["a"], Option.some("a")), included: { x: ada({ id: "x" }) } },
+      }),
+    ).model;
+    story(
+      update,
+      given(first),
+      message(Message.ClickedLoadMore()),
+      Command.resolve(
+        FetchMoreEntities,
+        Message.SucceededFetchMoreEntities({
+          version: 2,
+          page: { ...page(["b"], Option.none()), included: { y: ada({ id: "y" }) } },
+        }),
+      ),
+      model((m) => {
+        expect(m.entities._tag === "Loaded" && Object.keys(m.entities.included)).toEqual([
+          "x",
+          "y",
+        ]);
+      }),
+    );
+  });
+
   it("swaps the data template when the write version changes, unless it was edited", () => {
     story(
       update,

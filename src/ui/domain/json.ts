@@ -21,12 +21,13 @@ export const prettyJson = (value: Schema.Json): string => JSON.stringify(value, 
 /** One-line JSON, for dense tables. */
 export const compactJson = (value: Schema.Json): string => JSON.stringify(value);
 
-const asObject = (value: unknown): Option.Option<Readonly<Record<string, unknown>>> =>
+export const asObject = (value: unknown): Option.Option<Readonly<Record<string, unknown>>> =>
   typeof value === "object" && value !== null && !globalThis.Array.isArray(value)
     ? Option.some(value as Readonly<Record<string, unknown>>)
     : Option.none();
 
-const field = (value: unknown, key: string): unknown =>
+/** A property of an unknown value, or `undefined` when it isn't an object. */
+export const field = (value: unknown, key: string): unknown =>
   Option.match(asObject(value), {
     onNone: () => undefined,
     onSome: (object) => object[key],
@@ -34,7 +35,7 @@ const field = (value: unknown, key: string): unknown =>
 
 const exampleFor = (type: unknown): Schema.Json => {
   const kind = field(type, "type");
-  if (kind === "string") {
+  if (kind === "string" || kind === "link") {
     return "";
   }
   if (kind === "number") {
@@ -71,7 +72,7 @@ const exampleFields = (fields: unknown): Schema.Json =>
 
 /**
  * A starting document for an entity schema (docs/data-model.md): required
- * fields with blank values, optional fields left out.
+ * fields with blank values (links as ""), optional fields left out.
  */
 export const exampleDocument = (schema: Schema.Json): Schema.Json =>
   exampleFields(field(schema, "fields"));

@@ -5,7 +5,7 @@ import { ada, apiFailure, revision } from "@/domain/entityStore.fixture";
 import { init, Message, SaveEntity, update, view } from "./main.ts";
 
 const loaded = [
-  Message.SucceededFetchEntity({ requested: Option.none(), entity: ada() }),
+  Message.SucceededFetchEntity({ requested: Option.none(), entity: ada(), included: {} }),
   Message.SucceededFetchHistory({
     requested: Option.none(),
     page: {

@@ -88,6 +88,8 @@ export const apiFailure = (
     issues: [],
     report: Option.none(),
     currentRev: Option.none(),
+    problems: [],
+    linkedFrom: [],
     ...extra,
   });
 
@@ -123,3 +125,41 @@ export const passingReport: LensReport = {
   ok: true,
   forward: { checked: 100, failures: [] },
 };
+
+export const postSchema = {
+  fields: {
+    title: { type: "string" },
+    author: { type: "link", to: "person" },
+    reviewers: { type: "array", items: { type: "link", to: "person" } },
+  },
+};
+
+export const postType: TypeInfo = {
+  name: "post",
+  description: "",
+  latestVersion: 1,
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_000_000,
+  versions: [
+    {
+      type: "post",
+      version: 1,
+      schema: postSchema,
+      lens: Option.none(),
+      note: "",
+      createdAt: 1_700_000_000_000,
+    },
+  ],
+};
+
+export const post = (overrides: Partial<Entity> = {}): Entity => ({
+  id: "p1",
+  type: "post",
+  version: 1,
+  storedVersion: 1,
+  rev: 1,
+  data: { title: "Notes", author: "ada", reviewers: ["alan"] },
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_000_000,
+  ...overrides,
+});

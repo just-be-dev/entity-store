@@ -1,16 +1,19 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Option from "effect/Option";
 import { Command, given, message, model, story } from "foldkit/story";
-import { ada, apiFailure, revision } from "@/domain/entityStore.fixture";
+import { ada, apiFailure, personType, revision } from "@/domain/entityStore.fixture";
 import {
   DeleteEntity,
   Deletion,
   Editor,
   EntityState,
+  FetchBacklinks,
   FetchEditBase,
   FetchEntity,
   FetchHistory,
+  FetchMoreBacklinks,
   FetchMoreHistory,
+  FetchType,
   init,
   Message,
   NavigateToType,
@@ -28,7 +31,7 @@ const historyPage = (revs: ReadonlyArray<number>, nextBefore: Option.Option<numb
   nextBefore,
 });
 const loaded = [
-  Message.SucceededFetchEntity({ requested: Option.none(), entity: ada() }),
+  Message.SucceededFetchEntity({ requested: Option.none(), entity: ada(), included: {} }),
   Message.SucceededFetchHistory({
     requested: Option.none(),
     page: historyPage([3, 2], Option.some(2)),
@@ -37,7 +40,11 @@ const loaded = [
 
 describe("entity detail", () => {
   it("loads the entity and its history, learning the latest version and seeding the editor", () => {
-    expect(initial.commands?.map((c) => c.name)).toEqual([FetchEntity.name, FetchHistory.name]);
+    expect(initial.commands?.map((c) => c.name)).toEqual([
+      FetchEntity.name,
+      FetchHistory.name,
+      FetchBacklinks.name,
+    ]);
     expect(loaded.latestVersion).toEqual(Option.some(2));
     expect(loaded.editor).toEqual(
       Editor.Editing({
@@ -63,6 +70,7 @@ describe("entity detail", () => {
         Message.SucceededFetchEntity({
           requested: Option.some(1),
           entity: ada({ version: 1, data: { firstName: "Ada", lastName: "Lovelace" } }),
+          included: {},
         }),
       ),
       Command.resolve(
@@ -87,7 +95,11 @@ describe("entity detail", () => {
       message(Message.SelectedPresentVersion({ version: 1 })),
       Command.resolve(
         FetchEntity,
-        Message.SucceededFetchEntity({ requested: Option.none(), entity: ada({ rev: 99 }) }),
+        Message.SucceededFetchEntity({
+          requested: Option.none(),
+          entity: ada({ rev: 99 }),
+          included: {},
+        }),
       ),
       Command.resolve(
         FetchHistory,
@@ -128,7 +140,11 @@ describe("entity detail", () => {
       ),
       Command.resolve(
         FetchEntity,
-        Message.SucceededFetchEntity({ requested: Option.none(), entity: ada({ rev: 4 }) }),
+        Message.SucceededFetchEntity({
+          requested: Option.none(),
+          entity: ada({ rev: 4 }),
+          included: {},
+        }),
       ),
       Command.resolve(
         FetchHistory,
@@ -162,7 +178,12 @@ describe("entity detail", () => {
       Command.expectExact(
         FetchEntity({ id: "ada", version: Option.none() }),
         FetchHistory({ id: "ada", version: Option.none() }),
+        FetchBacklinks({ id: "ada" }),
         FetchEditBase({ id: "ada", version: 2 }),
+      ),
+      Command.resolve(
+        FetchBacklinks,
+        Message.SucceededFetchBacklinks({ page: { items: [], nextCursor: Option.none() } }),
       ),
       Command.resolve(
         FetchEditBase,
@@ -172,7 +193,11 @@ describe("entity detail", () => {
       ),
       Command.resolve(
         FetchEntity,
-        Message.SucceededFetchEntity({ requested: Option.none(), entity: ada({ rev: 5 }) }),
+        Message.SucceededFetchEntity({
+          requested: Option.none(),
+          entity: ada({ rev: 5 }),
+          included: {},
+        }),
       ),
       Command.resolve(
         FetchHistory,
@@ -264,6 +289,94 @@ describe("entity detail", () => {
         expect(m.latestVersion).toEqual(Option.some(2));
         expect(m.editor).toEqual(Editor.Idle());
       }),
+      Command.expectExact(FetchType({ name: "person" })),
+      Command.resolve(FetchType, Message.SucceededFetchType({ info: personType })),
+    );
+  });
+
+  it("fetches the type once, for link fields and the latest version", () => {
+    story(
+      update,
+      given(initial.model),
+      message(
+        Message.SucceededFetchEntity({ requested: Option.none(), entity: ada(), included: {} }),
+      ),
+      Command.expectExact(FetchType({ name: "person" })),
+      Command.resolve(
+        FetchType,
+        Message.SucceededFetchType({ info: { ...personType, latestVersion: 3 } }),
+      ),
+      message(
+        Message.SucceededFetchHistory({
+          requested: Option.none(),
+          page: historyPage([3], Option.none()),
+        }),
+      ),
+      Command.expectNone(),
+      model((m) => {
+        expect(m.type._tag).toBe("Loaded");
+        expect(m.latestVersion).toEqual(Option.some(3));
+      }),
+    );
+  });
+
+  it("pages through backlinks", () => {
+    const withBacklinks = update(
+      loaded,
+      Message.SucceededFetchBacklinks({
+        page: {
+          items: [{ source: "p1", type: "post", path: "author" }],
+          nextCursor: Option.some("p1"),
+        },
+      }),
+    ).model;
+    story(
+      update,
+      given(withBacklinks),
+      message(Message.ClickedLoadMoreBacklinks()),
+      Command.expectExact(FetchMoreBacklinks({ id: "ada", cursor: "p1" })),
+      Command.resolve(
+        FetchMoreBacklinks,
+        Message.SucceededFetchMoreBacklinks({
+          page: {
+            items: [{ source: "p2", type: "post", path: "reviewers[]" }],
+            nextCursor: Option.none(),
+          },
+        }),
+      ),
+      model((m) => {
+        expect(m.backlinks._tag === "Loaded" && m.backlinks.items.map((b) => b.source)).toEqual([
+          "p1",
+          "p2",
+        ]);
+      }),
+    );
+  });
+
+  it("refreshes backlinks when a delete is refused because the entity is linked", () => {
+    story(
+      update,
+      given(update(loaded, Message.ClickedDelete()).model),
+      message(Message.ClickedConfirmDelete()),
+      Command.resolve(
+        DeleteEntity,
+        Message.FailedDeleteEntity({
+          failure: apiFailure(409, "EntityLinked", "Entity 'ada' is linked", {
+            linkedFrom: [{ source: "p1", type: "post", path: "author" }],
+          }),
+        }),
+      ),
+      model((m) => expect(m.deletion._tag).toBe("Failed")),
+      Command.expectExact(FetchBacklinks({ id: "ada" })),
+      Command.resolve(
+        FetchBacklinks,
+        Message.SucceededFetchBacklinks({
+          page: {
+            items: [{ source: "p1", type: "post", path: "author" }],
+            nextCursor: Option.none(),
+          },
+        }),
+      ),
     );
   });
 });

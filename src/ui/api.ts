@@ -25,6 +25,8 @@ const failure = (status: number, error: string): ApiFailure =>
     issues: [],
     report: Option.none(),
     currentRev: Option.none(),
+    problems: [],
+    linkedFrom: [],
   });
 
 const decodeErrorBody = Schema.decodeUnknownResult(ErrorBody);
@@ -41,6 +43,8 @@ export const toApiFailure = (status: number, body: unknown): ApiFailure =>
         issues: decoded.issues ?? [],
         report: decoded.report,
         currentRev: decoded.currentRev,
+        problems: decoded.problems ?? [],
+        linkedFrom: decoded.linkedFrom ?? [],
       }),
   });
 

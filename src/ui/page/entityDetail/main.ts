@@ -18,15 +18,22 @@ import { selectField, versionOptions } from "@/components/select";
 import { badge } from "@/components/ui/badge";
 import { button } from "@/components/ui/button";
 import { textarea } from "@/components/ui/textarea";
+import { entityLink, preview } from "@/components/links";
 import {
   ApiFailure,
+  Backlink,
+  BacklinkPage,
   Deleted,
   Entity,
+  EntityWithLinks,
   HistoryPage,
+  Included,
   Revision,
   RevisionFailure,
+  TypeInfo,
 } from "@/domain/entityStore";
 import { parseJson, prettyJson } from "@/domain/json";
+import { type OutgoingLink, outgoingLinks } from "@/domain/links";
 import { formatTime } from "@/lib/format";
 import { AppRoute, href } from "@/route";
 
@@ -35,9 +42,18 @@ import { AppRoute, href } from "@/route";
 export const EntityState = defineTaggedUnion({
   Loading: {},
   Failed: { failure: ApiFailure },
-  Loaded: { entity: Entity },
+  Loaded: { entity: Entity, included: Included },
 });
 export type EntityState = typeof EntityState.Type;
+
+/** The entity's type, for its schemas (to find link fields) and latest version. */
+export const TypeState = defineTaggedUnion({
+  Idle: {},
+  Loading: {},
+  Failed: { failure: ApiFailure },
+  Loaded: { info: TypeInfo },
+});
+export type TypeState = typeof TypeState.Type;
 
 export const More = defineTaggedUnion({
   Idle: {},
@@ -58,6 +74,17 @@ export const History = defineTaggedUnion({
   },
 });
 export type History = typeof History.Type;
+
+export const Backlinks = defineTaggedUnion({
+  Loading: {},
+  Failed: { failure: ApiFailure },
+  Loaded: {
+    items: Schema.Array(Backlink),
+    nextCursor: Schema.Option(Schema.String),
+    more: More,
+  },
+});
+export type Backlinks = typeof Backlinks.Type;
 
 export const Save = defineTaggedUnion({
   Idle: {},
@@ -90,6 +117,8 @@ export const Model = Schema.Struct({
   presentVersion: Schema.Option(Schema.Int),
   latestVersion: Schema.Option(Schema.Int),
   entity: EntityState,
+  type: TypeState,
+  backlinks: Backlinks,
   history: History,
   editor: Editor,
   deletion: Deletion,
@@ -101,9 +130,16 @@ export type Model = typeof Model.Type;
 const Requested = Schema.Option(Schema.Int);
 
 export const Message = defineMessageUnion({
-  SucceededFetchEntity: { requested: Requested, entity: Entity },
+  SucceededFetchEntity: { requested: Requested, entity: Entity, included: Included },
   FailedFetchEntity: { requested: Requested, failure: ApiFailure },
   SelectedPresentVersion: { version: Schema.Int },
+  SucceededFetchType: { info: TypeInfo },
+  FailedFetchType: { failure: ApiFailure },
+  SucceededFetchBacklinks: { page: BacklinkPage },
+  FailedFetchBacklinks: { failure: ApiFailure },
+  ClickedLoadMoreBacklinks: {},
+  SucceededFetchMoreBacklinks: { page: BacklinkPage },
+  FailedFetchMoreBacklinks: { failure: ApiFailure },
   SucceededFetchHistory: { requested: Requested, page: HistoryPage },
   FailedFetchHistory: { requested: Requested, failure: ApiFailure },
   ClickedLoadMoreHistory: {},
@@ -135,11 +171,52 @@ export const FetchEntity = Command.define("FetchEntity", {
   args: { id: Schema.String, version: Requested },
   messages: [Message.SucceededFetchEntity, Message.FailedFetchEntity],
   execute: ({ id, version }) =>
-    getJson(apiUrl(`entities/${segment(id)}`, versionQuery(version)), Entity).pipe(
-      Effect.map((entity) => Message.SucceededFetchEntity({ requested: version, entity })),
+    getJson(
+      apiUrl(`entities/${segment(id)}`, { ...versionQuery(version), include: "links" }),
+      EntityWithLinks,
+    ).pipe(
+      Effect.map(({ included, ...entity }) =>
+        Message.SucceededFetchEntity({ requested: version, entity, included: included ?? {} }),
+      ),
       Effect.catch((failure) =>
         Effect.succeed(Message.FailedFetchEntity({ requested: version, failure })),
       ),
+    ),
+});
+
+export const FetchType = Command.define("FetchType", {
+  args: { name: Schema.String },
+  messages: [Message.SucceededFetchType, Message.FailedFetchType],
+  execute: ({ name }) =>
+    getJson(apiUrl(`types/${segment(name)}`), TypeInfo).pipe(
+      Effect.map((info) => Message.SucceededFetchType({ info })),
+      Effect.catch((failure) => Effect.succeed(Message.FailedFetchType({ failure }))),
+    ),
+});
+
+const backlinksUrl = (id: string, cursor: Option.Option<string>) =>
+  apiUrl(`entities/${segment(id)}/backlinks`, {
+    limit: "20",
+    ...Option.match(cursor, { onNone: () => ({}), onSome: (value) => ({ cursor: value }) }),
+  });
+
+export const FetchBacklinks = Command.define("FetchBacklinks", {
+  args: { id: Schema.String },
+  messages: [Message.SucceededFetchBacklinks, Message.FailedFetchBacklinks],
+  execute: ({ id }) =>
+    getJson(backlinksUrl(id, Option.none()), BacklinkPage).pipe(
+      Effect.map((page) => Message.SucceededFetchBacklinks({ page })),
+      Effect.catch((failure) => Effect.succeed(Message.FailedFetchBacklinks({ failure }))),
+    ),
+});
+
+export const FetchMoreBacklinks = Command.define("FetchMoreBacklinks", {
+  args: { id: Schema.String, cursor: Schema.String },
+  messages: [Message.SucceededFetchMoreBacklinks, Message.FailedFetchMoreBacklinks],
+  execute: ({ id, cursor }) =>
+    getJson(backlinksUrl(id, Option.some(cursor)), BacklinkPage).pipe(
+      Effect.map((page) => Message.SucceededFetchMoreBacklinks({ page })),
+      Effect.catch((failure) => Effect.succeed(Message.FailedFetchMoreBacklinks({ failure }))),
     ),
 });
 
@@ -219,6 +296,8 @@ export const init = (id: string): Update.Return<Model, Message> => ({
     presentVersion: Option.none(),
     latestVersion: Option.none(),
     entity: EntityState.Loading(),
+    type: TypeState.Idle(),
+    backlinks: Backlinks.Loading(),
     history: History.Loading(),
     editor: Editor.Idle(),
     deletion: Deletion.Idle(),
@@ -226,6 +305,7 @@ export const init = (id: string): Update.Return<Model, Message> => ({
   commands: [
     FetchEntity({ id, version: Option.none() }),
     FetchHistory({ id, version: Option.none() }),
+    FetchBacklinks({ id }),
   ],
 });
 
@@ -259,6 +339,23 @@ const editing = (entity: Entity, save: Save): Editor =>
 const withSave = (editor: Editor, save: Save): Editor =>
   editor._tag === "Editing" ? Editor.Editing({ ...editor, save }) : editor;
 
+/** Fetch the type once its name is known. */
+const loadType = (result: UpdateReturn, name: string): UpdateReturn =>
+  result.model.type._tag === "Idle"
+    ? {
+        model: modifyFields(result.model, { type: () => TypeState.Loading() }),
+        commands: [...(result.commands ?? []), FetchType({ name })],
+      }
+    : result;
+
+const reloadBacklinks = (result: UpdateReturn): UpdateReturn => ({
+  model: modifyFields(result.model, { backlinks: () => Backlinks.Loading() }),
+  commands: [...(result.commands ?? []), FetchBacklinks({ id: result.model.id })],
+});
+
+const withBacklinksMore = (backlinks: Backlinks, more: More): Backlinks =>
+  backlinks._tag === "Loaded" ? Backlinks.Loaded({ ...backlinks, more }) : backlinks;
+
 const withHistoryMore = (history: History, more: More): History =>
   history._tag === "Loaded" ? History.Loaded({ ...history, more }) : history;
 
@@ -289,16 +386,20 @@ const editorVersion = (editor: Editor): Option.Option<number> =>
 
 export const update = (model: Model, message: Message) =>
   Message.match<UpdateReturn>(message, {
-    SucceededFetchEntity: ({ requested, entity }) =>
+    SucceededFetchEntity: ({ requested, entity, included }) =>
       sameRequest(requested, model.presentVersion)
-        ? {
-            model: modifyFields(model, {
-              entity: () => EntityState.Loaded({ entity }),
-              latestVersion: (latest) =>
-                Option.isNone(requested) ? Option.some(entity.version) : latest,
-              editor: (editor) => (editor._tag === "Idle" ? editing(entity, Save.Idle()) : editor),
-            }),
-          }
+        ? loadType(
+            {
+              model: modifyFields(model, {
+                entity: () => EntityState.Loaded({ entity, included }),
+                latestVersion: (latest) =>
+                  Option.isNone(requested) ? Option.some(entity.version) : latest,
+                editor: (editor) =>
+                  editor._tag === "Idle" ? editing(entity, Save.Idle()) : editor,
+              }),
+            },
+            entity.type,
+          )
         : { model },
     FailedFetchEntity: ({ requested, failure }) =>
       sameRequest(requested, model.presentVersion)
@@ -306,24 +407,83 @@ export const update = (model: Model, message: Message) =>
         : { model },
     SelectedPresentVersion: ({ version }) =>
       reloadShown(modifyFields(model, { presentVersion: () => Option.some(version) })),
+    SucceededFetchType: ({ info }) => ({
+      model: modifyFields(model, {
+        type: () => TypeState.Loaded({ info }),
+        latestVersion: () => Option.some(info.latestVersion),
+      }),
+    }),
+    FailedFetchType: ({ failure }) => ({
+      model: modifyFields(model, { type: () => TypeState.Failed({ failure }) }),
+    }),
+    SucceededFetchBacklinks: ({ page }) => ({
+      model: modifyFields(model, {
+        backlinks: () =>
+          Backlinks.Loaded({ items: page.items, nextCursor: page.nextCursor, more: More.Idle() }),
+      }),
+    }),
+    FailedFetchBacklinks: ({ failure }) => ({
+      model: modifyFields(model, { backlinks: () => Backlinks.Failed({ failure }) }),
+    }),
+    ClickedLoadMoreBacklinks: () =>
+      Backlinks.match<UpdateReturn>(model.backlinks, {
+        Loading: () => ({ model }),
+        Failed: () => ({ model }),
+        Loaded: (loaded) =>
+          Option.match(loaded.nextCursor, {
+            onNone: () => ({ model }),
+            onSome: (cursor) =>
+              loaded.more._tag === "Loading"
+                ? { model }
+                : {
+                    model: modifyFields(model, {
+                      backlinks: (backlinks) => withBacklinksMore(backlinks, More.Loading()),
+                    }),
+                    commands: [FetchMoreBacklinks({ id: model.id, cursor })],
+                  },
+          }),
+      }),
+    SucceededFetchMoreBacklinks: ({ page }) =>
+      Backlinks.match<UpdateReturn>(model.backlinks, {
+        Loading: () => ({ model }),
+        Failed: () => ({ model }),
+        Loaded: (loaded) => ({
+          model: modifyFields(model, {
+            backlinks: () =>
+              Backlinks.Loaded({
+                items: Array.appendAll(loaded.items, page.items),
+                nextCursor: page.nextCursor,
+                more: More.Idle(),
+              }),
+          }),
+        }),
+      }),
+    FailedFetchMoreBacklinks: ({ failure }) => ({
+      model: modifyFields(model, {
+        backlinks: (backlinks) => withBacklinksMore(backlinks, More.Failed({ failure })),
+      }),
+    }),
     SucceededFetchHistory: ({ requested, page }) =>
       sameRequest(requested, model.presentVersion)
-        ? {
-            model: modifyFields(model, {
-              history: () =>
-                History.Loaded({
-                  type: page.type,
-                  items: page.items,
-                  failures: page.failures,
-                  nextBefore: page.nextBefore,
-                  more: More.Idle(),
-                }),
-              latestVersion: (latest) =>
-                Option.isNone(requested) && Option.isNone(latest)
-                  ? Option.map(Array.head(page.items), (revision) => revision.version)
-                  : latest,
-            }),
-          }
+        ? loadType(
+            {
+              model: modifyFields(model, {
+                history: () =>
+                  History.Loaded({
+                    type: page.type,
+                    items: page.items,
+                    failures: page.failures,
+                    nextBefore: page.nextBefore,
+                    more: More.Idle(),
+                  }),
+                latestVersion: (latest) =>
+                  Option.isNone(requested) && Option.isNone(latest)
+                    ? Option.map(Array.head(page.items), (revision) => revision.version)
+                    : latest,
+              }),
+            },
+            page.type,
+          )
         : { model },
     FailedFetchHistory: ({ requested, failure }) =>
       sameRequest(requested, model.presentVersion)
@@ -440,7 +600,7 @@ export const update = (model: Model, message: Message) =>
       }),
     }),
     ClickedReload: () => {
-      const reloaded = reloadShown(model);
+      const reloaded = reloadBacklinks(reloadShown(model));
       return Option.match(editorVersion(model.editor), {
         onNone: () => reloaded,
         onSome: (version) => ({
@@ -473,9 +633,12 @@ export const update = (model: Model, message: Message) =>
       model,
       commands: [NavigateToType({ name: type })],
     }),
-    FailedDeleteEntity: ({ failure }) => ({
-      model: modifyFields(model, { deletion: () => Deletion.Failed({ failure }) }),
-    }),
+    FailedDeleteEntity: ({ failure }) => {
+      const failed = {
+        model: modifyFields(model, { deletion: () => Deletion.Failed({ failure }) }),
+      };
+      return Option.contains(failure.code, "EntityLinked") ? reloadBacklinks(failed) : failed;
+    },
     CompletedNavigateToType: () => ({ model }),
   });
 
@@ -610,6 +773,129 @@ const currentView = (model: Model, h: HtmlBuilder<Message>): Html =>
                 h,
               ),
               jsonBlock(entity.data, h, { label: `Data as v${entity.version}` }),
+            ],
+          ),
+      }),
+    ],
+    h,
+  );
+
+const outgoingRow = (link: OutgoingLink, included: Included, h: HtmlBuilder<Message>): Html => {
+  const target = Option.fromNullishOr(included[link.target]);
+  return h.keyed("li")(
+    `${link.path}:${link.target}`,
+    [h.Class("grid gap-x-3 gap-y-0.5 text-sm sm:grid-cols-[12rem_minmax(0,1fr)]")],
+    [
+      h.code([h.Class("truncate font-mono text-xs text-muted-foreground")], [link.path]),
+      h.div(
+        [h.Class("flex min-w-0 flex-wrap items-baseline gap-x-2")],
+        [
+          entityLink(link.target, h),
+          Option.match(target, {
+            onNone: () =>
+              h.span([h.Class("text-xs text-destructive")], [`${link.targetType} not found`]),
+            onSome: (entity) =>
+              h.span(
+                [
+                  h.Class("min-w-0 truncate text-xs text-muted-foreground"),
+                  h.Title(preview(entity)),
+                ],
+                [`${entity.type} · ${preview(entity)}`],
+              ),
+          }),
+        ],
+      ),
+    ],
+  );
+};
+
+const linksView = (model: Model, h: HtmlBuilder<Message>): Html =>
+  section(
+    { title: "Links" },
+    [
+      EntityState.match(model.entity, {
+        Loading: () => statusText("Loading entity…", h),
+        Failed: () => statusText("The entity couldn't be read, so its links aren't shown.", h),
+        Loaded: ({ entity, included }) =>
+          TypeState.match(model.type, {
+            Idle: () => statusText("Loading schema…", h),
+            Loading: () => statusText("Loading schema…", h),
+            Failed: ({ failure }) => failureAlert(failure, h),
+            Loaded: ({ info }) =>
+              Option.match(
+                Array.findFirst(info.versions, (version) => version.version === entity.version),
+                {
+                  onNone: () => statusText(`No schema for v${entity.version}.`, h),
+                  onSome: (version) =>
+                    Array.match(outgoingLinks(version.schema, entity.data), {
+                      onEmpty: () =>
+                        statusText(`This entity has no links at v${entity.version}.`, h),
+                      onNonEmpty: (links) =>
+                        h.ul(
+                          [h.Class("space-y-2"), h.AriaLabel("Outgoing links")],
+                          Array.map(links, (link) => outgoingRow(link, included, h)),
+                        ),
+                    }),
+                },
+              ),
+          }),
+      }),
+    ],
+    h,
+  );
+
+const backlinksView = (model: Model, h: HtmlBuilder<Message>): Html =>
+  section(
+    { title: "Linked from" },
+    [
+      Backlinks.match(model.backlinks, {
+        Loading: () => statusText("Loading backlinks…", h),
+        Failed: ({ failure }) => failureAlert(failure, h),
+        Loaded: ({ items, nextCursor, more }) =>
+          h.div(
+            [h.Class("space-y-3")],
+            [
+              Array.match(items, {
+                onEmpty: () => statusText("Nothing links here.", h),
+                onNonEmpty: (backlinks) =>
+                  h.ul(
+                    [h.Class("space-y-1"), h.AriaLabel("Backlinks")],
+                    Array.map(backlinks, (backlink) =>
+                      h.keyed("li")(
+                        `${backlink.source}:${backlink.path}`,
+                        [h.Class("flex flex-wrap items-baseline gap-x-2 text-sm")],
+                        [
+                          entityLink(backlink.source, h),
+                          h.span(
+                            [h.Class("font-mono text-xs text-muted-foreground")],
+                            [`${backlink.type} · ${backlink.path}`],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              }),
+              Option.match(nextCursor, {
+                onNone: () => h.empty,
+                onSome: () =>
+                  h.div(
+                    [h.Class("flex flex-wrap items-center gap-3")],
+                    [
+                      button(
+                        {
+                          type: "button",
+                          variant: "outline",
+                          size: "sm",
+                          onClick: Message.ClickedLoadMoreBacklinks(),
+                          isDisabled: more._tag === "Loading",
+                        },
+                        more._tag === "Loading" ? "Loading…" : "More backlinks",
+                        h,
+                      ),
+                      more._tag === "Failed" ? failureAlert(more.failure, h) : h.empty,
+                    ],
+                  ),
+              }),
             ],
           ),
       }),
@@ -799,6 +1085,7 @@ export const view = Submodel.defineView<Model, Message>((model, h): Html =>
         h,
       ),
       currentView(model, h),
+      h.div([h.Class("grid gap-6 lg:grid-cols-2")], [linksView(model, h), backlinksView(model, h)]),
       EntityState.match(model.entity, {
         Loading: () => h.empty,
         Failed: () => h.empty,
