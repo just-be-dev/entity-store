@@ -235,7 +235,7 @@ describe("entity store", () => {
     }).pipe(Effect.provide(setup().layer)),
   );
 
-  it.effect("optimistic concurrency: stale expectedRev fails, blind writes retry", () => {
+  it.live("optimistic concurrency: stale expectedRev fails, blind writes retry", () => {
     let interleave: (() => void) | undefined;
     const { sqlite, layer } = setup({
       beforeBatch: () => {

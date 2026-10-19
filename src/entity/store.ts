@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Random from "effect/Random";
 import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type { Json, JsonObject } from "../lens/expr.ts";
 import { compileLens } from "../lens/apply.ts";
@@ -100,7 +101,7 @@ export interface WriteOptions {
 const DEFAULT_PAGE = 50;
 const MAX_PAGE = 200;
 const EXISTING_SAMPLE = 50;
-const WRITE_ATTEMPTS = 5;
+const WRITE_ATTEMPTS = 8;
 
 // ─── Service ────────────────────────────────────────────────────────────────
 
@@ -621,8 +622,10 @@ const makeEntityStore = Effect.gen(function* () {
       };
       return entity;
     }).pipe(
-      // Blind writes (no expectedRev) retry on a lost race against a fresh read.
+      // Blind writes (no expectedRev) retry a lost race against a fresh read,
+      // with jittered backoff so hot entities don't retry in lockstep.
       Effect.retry({
+        schedule: Schedule.jittered(Schedule.exponential("10 millis")),
         times: options.expectedRev === undefined ? WRITE_ATTEMPTS - 1 : 0,
         while: (error) => error._tag === "RevConflict",
       }),
