@@ -23,6 +23,7 @@
               "src/ui/api.ts",
               "src/ui/**/command.ts",
               "src/api.ts",
+              "src/http/*.ts",
               "src/platform/cloudflare/api.ts"
             ],
             "options": { "allowedUnstableApis": ["effect/http"] }
@@ -36,7 +37,7 @@
             "options": { "allowedUnstableApis": ["@effect/vitest"] }
           },
           {
-            "include": ["src/api.test.ts"],
+            "include": ["src/api.test.ts", "src/http/*.test.ts"],
             "options": { "allowedUnstableApis": ["effect/http", "@effect/vitest"] }
           }
         ]

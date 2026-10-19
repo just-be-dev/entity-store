@@ -1,14 +1,9 @@
 import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/http/HttpRouter";
-import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Layer from "effect/Layer";
+import { entityRoutes } from "./http/entities.ts";
+import { json } from "./http/response.ts";
 import { AppInfo } from "./service.ts";
-
-const json = (body: unknown, status = 200) =>
-  HttpServerResponse.jsonUnsafe(body, {
-    status,
-    headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
-  });
 
 export const apiRoutes = Layer.mergeAll(
   HttpRouter.add(
@@ -19,5 +14,6 @@ export const apiRoutes = Layer.mergeAll(
       return json(yield* info.read);
     }),
   ),
+  entityRoutes,
   HttpRouter.add("*", "*", json({ error: "Not found" }, 404)),
 );

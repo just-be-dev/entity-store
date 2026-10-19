@@ -412,8 +412,7 @@ const typeOf = (v: Value) =>
 const isObject = (v: Value): v is JsonObject =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-const truthy = (v: Value) =>
-  !(v === undefined || v === null || v === false || v === 0 || v === "");
+const truthy = (v: Value) => !(v === undefined || v === null || v === false || v === 0 || v === "");
 
 export const jsonEquals = (a: Value, b: Value): boolean => {
   if (a === b) {
@@ -428,7 +427,9 @@ export const jsonEquals = (a: Value, b: Value): boolean => {
   if (isObject(a) && isObject(b)) {
     const ka = Object.keys(a).filter((k) => a[k] !== undefined);
     const kb = Object.keys(b).filter((k) => b[k] !== undefined);
-    return ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && jsonEquals(a[k], b[k]));
+    return (
+      ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && jsonEquals(a[k], b[k]))
+    );
   }
   return false;
 };
@@ -485,13 +486,8 @@ interface Builtin {
   readonly doc: string;
 }
 
-const builtin = (
-  min: number,
-  max: number,
-  doc: string,
-  call: Call,
-  lambdaArg?: number,
-): Builtin => (lambdaArg === undefined ? { min, max, doc, call } : { min, max, doc, call, lambdaArg });
+const builtin = (min: number, max: number, doc: string, call: Call, lambdaArg?: number): Builtin =>
+  lambdaArg === undefined ? { min, max, doc, call } : { min, max, doc, call, lambdaArg };
 
 const sliceable = (fn: string, v: Value) => {
   if (typeof v === "string" || Array.isArray(v)) {
@@ -507,7 +503,11 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
       return v;
     }
     const n = typeof v === "boolean" ? (v ? 1 : 0) : Number(typeof v === "string" ? v.trim() : v);
-    if (typeof v === "object" || (typeof v === "string" && v.trim() === "") || !Number.isFinite(n)) {
+    if (
+      typeof v === "object" ||
+      (typeof v === "string" && v.trim() === "") ||
+      !Number.isFinite(n)
+    ) {
       throw new ExprError(`${fn} can't convert ${JSON.stringify(v)} to a number`);
     }
     return n;
@@ -561,8 +561,11 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   coalesce: builtin(1, Infinity, "First value that isn't null or absent", (_, args) =>
     args.find((a) => a !== undefined && a !== null),
   ),
-  exists: builtin(1, 1, "Whether a value is present and not null", (_, [v]) =>
-    v !== undefined && v !== null,
+  exists: builtin(
+    1,
+    1,
+    "Whether a value is present and not null",
+    (_, [v]) => v !== undefined && v !== null,
   ),
   typeOf: builtin(1, 1, "Type name of a value", (_, [v]) => typeOf(v)),
   round: builtin(1, 2, "Round to n digits", (fn, [v, digits]) => {
@@ -637,8 +640,10 @@ const get = (target: Value, key: Value): Value => {
 
 const compare = (op: "<" | "<=" | ">" | ">=", a: Value, b: Value): boolean => {
   if (
-    !((typeof a === "number" && typeof b === "number") ||
-      (typeof a === "string" && typeof b === "string"))
+    !(
+      (typeof a === "number" && typeof b === "number") ||
+      (typeof a === "string" && typeof b === "string")
+    )
   ) {
     throw new ExprError(`Can't compare ${typeOf(a)} ${op} ${typeOf(b)}`);
   }
@@ -662,7 +667,8 @@ const add = (a: Value, b: Value): Value => {
     return [...a, ...b];
   }
   if (
-    (typeof a === "string" && (typeof b === "string" || typeof b === "number" || typeof b === "boolean")) ||
+    (typeof a === "string" &&
+      (typeof b === "string" || typeof b === "number" || typeof b === "boolean")) ||
     (typeof b === "string" && (typeof a === "number" || typeof a === "boolean"))
   ) {
     return String(a) + String(b);
@@ -761,7 +767,10 @@ const evaluate = (e: Expr, scope: Scope): Value => {
 export const run = (e: Expr, doc: Value): Value => evaluate(e, { doc, locals: new Map() });
 
 /** Field names referenced at the top level of the document (best effort, for docs/UI). */
-export const freeVariables = (e: Expr | Lambda, bound: ReadonlySet<string> = new Set()): Set<string> => {
+export const freeVariables = (
+  e: Expr | Lambda,
+  bound: ReadonlySet<string> = new Set(),
+): Set<string> => {
   const out = new Set<string>();
   const visit = (x: Expr | Lambda, b: ReadonlySet<string>) => {
     switch (x.k) {

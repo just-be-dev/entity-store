@@ -149,10 +149,10 @@ export class EntityAlreadyExists extends Schema.TaggedError<EntityAlreadyExists>
   { id: Schema.String },
 ) {}
 
-export class RevisionNotFound extends Schema.TaggedError<RevisionNotFound>()(
-  "RevisionNotFound",
-  { id: Schema.String, rev: Schema.Finite },
-) {}
+export class RevisionNotFound extends Schema.TaggedError<RevisionNotFound>()("RevisionNotFound", {
+  id: Schema.String,
+  rev: Schema.Finite,
+}) {}
 
 /** The write was based on a stale revision. */
 export class RevConflict extends Schema.TaggedError<RevConflict>()("RevConflict", {
@@ -161,21 +161,19 @@ export class RevConflict extends Schema.TaggedError<RevConflict>()("RevConflict"
   currentRev: Schema.Finite,
 }) {}
 
-export class ValidationFailed extends Schema.TaggedError<ValidationFailed>()(
-  "ValidationFailed",
-  { type: Schema.String, version: Schema.Finite, message: Schema.String },
-) {}
+export class ValidationFailed extends Schema.TaggedError<ValidationFailed>()("ValidationFailed", {
+  type: Schema.String,
+  version: Schema.Finite,
+  message: Schema.String,
+}) {}
 
 /** A lens couldn't move data between versions, or its output didn't fit the target schema. */
-export class ProjectionFailed extends Schema.TaggedError<ProjectionFailed>()(
-  "ProjectionFailed",
-  {
-    type: Schema.String,
-    from: Schema.Finite,
-    to: Schema.Finite,
-    message: Schema.String,
-  },
-) {}
+export class ProjectionFailed extends Schema.TaggedError<ProjectionFailed>()("ProjectionFailed", {
+  type: Schema.String,
+  from: Schema.Finite,
+  to: Schema.Finite,
+  message: Schema.String,
+}) {}
 
 /** Storage misbehaved or returned data that no longer decodes. */
 export class StorageFailure extends Schema.TaggedError<StorageFailure>()("StorageFailure", {

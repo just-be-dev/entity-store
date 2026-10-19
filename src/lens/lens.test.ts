@@ -119,7 +119,9 @@ describe("lens ops", () => {
 
   it("derive can transform a field in place in both directions", () => {
     const lens = lensOf({
-      ops: [{ op: "derive", forward: { price: "price / 100" }, backward: { price: "price * 100" } }],
+      ops: [
+        { op: "derive", forward: { price: "price / 100" }, backward: { price: "price * 100" } },
+      ],
     });
     expect(ok(lens.forward({ price: 1250, name: "x" }))).toEqual({ price: 12.5, name: "x" });
     expect(ok(lens.backward({ price: 12.5 }))).toEqual({ price: 1250 });

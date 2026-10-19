@@ -2,7 +2,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Layer from "effect/Layer";
-import { AppInfo } from "./service.ts";
+import { testAppLayer } from "./testing/app.ts";
 import { apiRoutes } from "./api.ts";
 
 it.effect("health reads the supplied capability and unknown routes return JSON errors", () =>
@@ -10,7 +10,7 @@ it.effect("health reads the supplied capability and unknown routes return JSON e
     const { handler } = yield* Effect.acquireRelease(
       Effect.sync(() =>
         HttpRouter.toWebHandler(
-          apiRoutes.pipe(Layer.provideMerge(AppInfo.layer("Different project"))),
+          apiRoutes.pipe(Layer.provideMerge(testAppLayer("Different project"))),
           { disableLogger: true },
         ),
       ),

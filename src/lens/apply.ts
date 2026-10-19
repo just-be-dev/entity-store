@@ -34,7 +34,12 @@ const withField = (doc: JsonObject, key: string, value: Value): JsonObject => {
   if (value === undefined) {
     delete copy[key];
   } else {
-    Object.defineProperty(copy, key, { value, enumerable: true, writable: true, configurable: true });
+    Object.defineProperty(copy, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return copy;
 };
@@ -46,13 +51,20 @@ class LensRuntimeError extends Error {
   override readonly name = "LensRuntimeError";
 }
 
-const rename = (from: string, to: string): Step => (doc) =>
-  has(doc, from) ? withField(without(doc, from), to, doc[from]) : doc;
+const rename =
+  (from: string, to: string): Step =>
+  (doc) =>
+    has(doc, from) ? withField(without(doc, from), to, doc[from]) : doc;
 
-const add = (field: string, value: Json | undefined): Step => (doc) =>
-  has(doc, field) || value === undefined ? doc : withField(doc, field, value);
+const add =
+  (field: string, value: Json | undefined): Step =>
+  (doc) =>
+    has(doc, field) || value === undefined ? doc : withField(doc, field, value);
 
-const remove = (field: string): Step => (doc) => without(doc, field);
+const remove =
+  (field: string): Step =>
+  (doc) =>
+    without(doc, field);
 
 const convert =
   (field: string, pairs: ReadonlyArray<readonly [Json, Json]>, fallback: Json | undefined): Step =>

@@ -116,8 +116,7 @@ export const makeRegistry = Effect.gen(function* () {
 
   const toLoaded = (row: typeof VersionRow.Type) =>
     Effect.gen(function* () {
-      const lens =
-        row.lens === null ? undefined : compileLens(row.lens);
+      const lens = row.lens === null ? undefined : compileLens(row.lens);
       if (lens !== undefined && Result.isFailure(lens)) {
         return yield* new StorageFailure({
           message: `Stored lens for ${row.type} v${row.version} no longer compiles`,

@@ -34,9 +34,7 @@ export type LensOp =
       readonly backward: { readonly [field: string]: string };
     };
 
-const OpsRef = Schema.suspend(
-  (): Schema.Codec<ReadonlyArray<LensOp>> => Schema.Array(LensOp),
-);
+const OpsRef = Schema.suspend((): Schema.Codec<ReadonlyArray<LensOp>> => Schema.Array(LensOp));
 
 export const LensOp: Schema.Codec<LensOp> = Schema.Union([
   Schema.Struct({ op: Schema.Literal("rename"), from: Schema.String, to: Schema.String }),

@@ -71,7 +71,9 @@ describe("entity store", () => {
         version: 1,
         data: { firstName: "Grace", lastName: "Hopper", email: "g@example.com" },
       });
-      expect(generated.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(generated.id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
     }).pipe(Effect.provide(setup().layer)),
   );
 
@@ -100,9 +102,9 @@ describe("entity store", () => {
           }),
         ),
       ).toBe("EntityAlreadyExists");
-      expect(
-        yield* failureTag(store.create("person", { version: 2, data: {} })),
-      ).toBe("VersionNotFound");
+      expect(yield* failureTag(store.create("person", { version: 2, data: {} }))).toBe(
+        "VersionNotFound",
+      );
       expect(yield* failureTag(store.createType({ name: "person", schema: PersonV1 }))).toBe(
         "TypeAlreadyExists",
       );
@@ -150,9 +152,9 @@ describe("entity store", () => {
     Effect.gen(function* () {
       const { store } = yield* withPeople;
       const broken: Lens = { ops: [] };
-      expect(yield* failureTag(store.addVersion("person", { schema: PersonV2, lens: broken }))).toBe(
-        "LensCheckFailed",
-      );
+      expect(
+        yield* failureTag(store.addVersion("person", { schema: PersonV2, lens: broken })),
+      ).toBe("LensCheckFailed");
       const check = yield* store.checkVersion("person", { schema: PersonV2, lens: v1ToV2 });
       expect(check.report.ok).toBe(true);
       expect(check.report.existing.checked).toBe(1);
@@ -198,7 +200,11 @@ describe("entity store", () => {
 
       const edited = yield* store.patch("grace", { version: 1, patch: { lastName: "Murray" } });
       expect(edited).toMatchObject({ version: 1, storedVersion: 2 });
-      expect(edited.data).toEqual({ firstName: "Grace", lastName: "Murray", email: "g@example.com" });
+      expect(edited.data).toEqual({
+        firstName: "Grace",
+        lastName: "Murray",
+        email: "g@example.com",
+      });
 
       const now = yield* store.get("grace");
       expect(now.data).toEqual({ fullName: "Grace Murray", email: "g@example.com", age: 85 });
@@ -222,7 +228,10 @@ describe("entity store", () => {
       // History keeps the v1 snapshot; it is lensed to whatever version is asked for.
       const history = yield* store.history("ada", { version: 2 });
       expect(history.items.map((r) => r.storedVersion)).toEqual([2, 1]);
-      expect(history.items[1]?.data).toEqual({ fullName: "Ada Lovelace", email: "ada@example.com" });
+      expect(history.items[1]?.data).toEqual({
+        fullName: "Ada Lovelace",
+        email: "ada@example.com",
+      });
     }).pipe(Effect.provide(setup().layer)),
   );
 
@@ -262,9 +271,7 @@ describe("entity store", () => {
       expect(lost._tag).toBe("RevConflict");
 
       interleave = () => {
-        sqlite.database
-          .prepare("UPDATE entities SET rev = 3 WHERE id = 'ada'")
-          .run();
+        sqlite.database.prepare("UPDATE entities SET rev = 3 WHERE id = 'ada'").run();
         sqlite.database
           .prepare(
             "INSERT INTO entity_revisions SELECT id, rev, version, 1, 'patch', data, updated_at FROM entities WHERE id = 'ada'",
@@ -295,7 +302,9 @@ describe("entity store", () => {
     return Effect.gen(function* () {
       const { store } = yield* withPeople;
       fail = true;
-      const error = yield* Effect.flip(store.patch("ada", { version: 1, patch: { firstName: "X" } }));
+      const error = yield* Effect.flip(
+        store.patch("ada", { version: 1, patch: { firstName: "X" } }),
+      );
       expect(error._tag).toBe("StorageFailure");
       fail = false;
       sqlite.database.exec("DROP TRIGGER poison");

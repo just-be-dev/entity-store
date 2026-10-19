@@ -1,1 +1,51 @@
-{"numTotalTestSuites":3,"numPassedTestSuites":3,"numFailedTestSuites":0,"numPendingTestSuites":0,"numTotalTests":9,"numPassedTests":9,"numFailedTests":0,"numPendingTests":0,"numTodoTests":0,"snapshot":{"added":0,"failure":false,"filesAdded":0,"filesRemoved":0,"filesRemovedList":[],"filesUnmatched":0,"filesUpdated":0,"matched":0,"total":0,"unchecked":0,"uncheckedKeysByFile":[],"unmatched":0,"updated":0,"didUpdate":false},"startTime":1792417654222,"success":true,"testResults":[{"assertionResults":[{"ancestorTitles":["lens ops"],"fullName":"lens ops transforms forward and backward","status":"passed","title":"transforms forward and backward","duration":1.730000000000004,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens ops"],"fullName":"lens ops applies backward ops in reverse order","status":"passed","title":"applies backward ops in reverse order","duration":0.11283400000000654,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens ops"],"fullName":"lens ops works inside nested objects and array elements","status":"passed","title":"works inside nested objects and array elements","duration":0.16095799999999372,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens ops"],"fullName":"lens ops derive can transform a field in place in both directions","status":"passed","title":"derive can transform a field in place in both directions","duration":0.1321670000000097,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens ops"],"fullName":"lens ops reports definition problems with paths","status":"passed","title":"reports definition problems with paths","duration":0.13187499999999375,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens ops"],"fullName":"lens ops surfaces runtime failures as errors, not exceptions","status":"passed","title":"surfaces runtime failures as errors, not exceptions","duration":0.08525000000000205,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens check"],"fullName":"lens check passes a correct lens and reports round-trip loss as a warning","status":"passed","title":"passes a correct lens and reports round-trip loss as a warning","duration":8.904415999999983,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens check"],"fullName":"lens check finds counterexamples for a lens that misses a required field","status":"passed","title":"finds counterexamples for a lens that misses a required field","duration":1.5197919999999954,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]},{"ancestorTitles":["lens check"],"fullName":"lens check checks stored documents too","status":"passed","title":"checks stored documents too","duration":0.533916999999974,"failureMessages":[],"meta":{},"tags":[],"benchmarks":[]}],"startTime":1792417654364,"endTime":1792417654377.534,"status":"passed","message":"","name":"/Users/just-be/Library/Application Support/Sesh/scratch/create-entity-store/src/lens/lens.test.ts"}]}
+{
+  "numTotalTestSuites": 1,
+  "numPassedTestSuites": 1,
+  "numFailedTestSuites": 0,
+  "numPendingTestSuites": 0,
+  "numTotalTests": 1,
+  "numPassedTests": 1,
+  "numFailedTests": 0,
+  "numPendingTests": 0,
+  "numTodoTests": 0,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 1792417776572,
+  "success": true,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": [],
+          "fullName": "health reads the supplied capability and unknown routes return JSON errors",
+          "status": "passed",
+          "title": "health reads the supplied capability and unknown routes return JSON errors",
+          "duration": 7.017167000000001,
+          "failureMessages": [],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        }
+      ],
+      "startTime": 1792417776765,
+      "endTime": 1792417776772.017,
+      "status": "passed",
+      "message": "",
+      "name": "/Users/just-be/Library/Application Support/Sesh/scratch/create-entity-store/src/api.test.ts"
+    }
+  ]
+}

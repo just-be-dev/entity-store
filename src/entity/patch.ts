@@ -40,7 +40,11 @@ export interface Change {
  * arrays and scalars are replaced whole, because element positions don't
  * survive lens translation reliably.
  */
-export const diff = (before: Json, after: Json, path: ReadonlyArray<string> = []): Array<Change> => {
+export const diff = (
+  before: Json,
+  after: Json,
+  path: ReadonlyArray<string> = [],
+): Array<Change> => {
   if (jsonEquals(before, after)) {
     return [];
   }

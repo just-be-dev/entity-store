@@ -110,7 +110,10 @@ export class EntityStore extends Context.Service<
   Effect.Success<typeof makeEntityStore>
 >()("entity-store/EntityStore") {
   /** Needs a SqlDatabase and an isolate-lifetime VersionCache. */
-  static readonly layer = Layer.effect(EntityStore, Effect.suspend(() => makeEntityStore));
+  static readonly layer = Layer.effect(
+    EntityStore,
+    Effect.suspend(() => makeEntityStore),
+  );
 }
 
 const makeEntityStore = Effect.gen(function* () {
@@ -683,7 +686,12 @@ const makeEntityStore = Effect.gen(function* () {
         return yield* new EntityNotFound({ id });
       }
       const head = yield* readRow(id);
-      const empty: HistoryPage = { id: id as Entity["id"], type: head.type, items: [], failures: [] };
+      const empty: HistoryPage = {
+        id: id as Entity["id"],
+        type: head.type,
+        items: [],
+        failures: [],
+      };
       return empty;
     }
     const version = options?.version ?? first.latest_version;
