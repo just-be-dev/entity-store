@@ -10,6 +10,7 @@ export const AppRoute = defineRouteUnion({
   TypeList: {},
   TypeDetail: { name: Schema.String },
   NewVersion: { name: Schema.String },
+  TypeIndexes: { name: Schema.String },
   EntityDetail: { id: Schema.String },
   NotFound: { path: Schema.String },
 });
@@ -31,6 +32,13 @@ export const newVersionRouter = pipe(
   Route.mapTo(AppRoute.NewVersion),
 );
 
+export const typeIndexesRouter = pipe(
+  literal("types"),
+  slash(string("name")),
+  slash(literal("indexes")),
+  Route.mapTo(AppRoute.TypeIndexes),
+);
+
 export const entityDetailRouter = pipe(
   literal("entities"),
   slash(string("id")),
@@ -39,6 +47,7 @@ export const entityDetailRouter = pipe(
 
 const routeParser = Route.oneOf(
   newVersionRouter,
+  typeIndexesRouter,
   typeDetailRouter,
   entityDetailRouter,
   typeListRouter,
@@ -73,6 +82,7 @@ const routePath = (route: AppRoute): string =>
     TypeList: () => typeListRouter(),
     TypeDetail: ({ name }) => typeDetailRouter({ name }),
     NewVersion: ({ name }) => newVersionRouter({ name }),
+    TypeIndexes: ({ name }) => typeIndexesRouter({ name }),
     EntityDetail: ({ id }) => entityDetailRouter({ id }),
     NotFound: ({ path }) => path,
   });

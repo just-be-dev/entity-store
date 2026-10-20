@@ -1,5 +1,5 @@
 import * as Option from "effect/Option";
-import type { Entity, LensReport, Revision, TypeInfo } from "./entityStore.ts";
+import type { Entity, IndexInfo, LensReport, Revision, TypeInfo } from "./entityStore.ts";
 import { ApiFailure } from "./entityStore.ts";
 
 export const personV1Schema = {
@@ -90,6 +90,7 @@ export const apiFailure = (
     currentRev: Option.none(),
     problems: [],
     linkedFrom: [],
+    conflicts: [],
     ...extra,
   });
 
@@ -161,5 +162,18 @@ export const post = (overrides: Partial<Entity> = {}): Entity => ({
   data: { title: "Notes", author: "ada", reviewers: ["alan"] },
   createdAt: 1_700_000_000_000,
   updatedAt: 1_700_000_000_000,
+  ...overrides,
+});
+
+export const emailIndex = (overrides: Partial<IndexInfo> = {}): IndexInfo => ({
+  type: "person",
+  name: "email",
+  version: 2,
+  key: "lower(email)",
+  unique: true,
+  state: "ready",
+  error: Option.none(),
+  createdAt: 1_700_000_300_000,
+  updatedAt: 1_700_000_300_000,
   ...overrides,
 });

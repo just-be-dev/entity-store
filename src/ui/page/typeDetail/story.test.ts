@@ -6,6 +6,7 @@ import {
   CreateEntity,
   Entities,
   FetchEntities,
+  FetchIndexes,
   FetchMoreEntities,
   FetchType,
   init,
@@ -25,7 +26,7 @@ const page = (ids: ReadonlyArray<string>, nextCursor: Option.Option<string>) => 
 
 describe("type detail", () => {
   it("fetches the type, then its entities at the latest version", () => {
-    expect(initial.commands?.map((c) => c.name)).toEqual([FetchType.name]);
+    expect(initial.commands?.map((c) => c.name)).toEqual([FetchType.name, FetchIndexes.name]);
     story(
       update,
       given(initial.model),
