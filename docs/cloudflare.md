@@ -72,7 +72,11 @@ Cloudflare Access authenticates. One shared Access application (`src/platform/cl
 The API turns each request's verified principal into the request-scoped `Identity` service (`src/auth/identity.ts`):
 
 - **Direct requests:** `Cloudflare.Access.Context`, which only Access populates.
-- **Through the Website's service binding:** there's no `ctx.access`. The edge forwards the principal it got from Access (`x-entity-store-principal`) together with `EDGE_SECRET` (`x-entity-store-edge`), a random value Alchemy generates and binds to both Workers. The API accepts a forwarded principal only when the secret matches (compared in constant time). The edge deletes both headers from incoming requests first.
+- **Through the Website's service binding:** there's no `ctx.access`, and the Website's own script doesn't get one either, because the static assets router sits in front of it. The edge forwards every header unchanged, including the `Cf-Access-Jwt-Assertion` token Access adds to every request it admits. The API verifies that token with `jose`:
+  - RS256 against the team's published keys, cached per isolate;
+  - issuer pinned to `https://<ACCESS_TEAM_DOMAIN>`;
+  - audience pinned to the Access application's AUD, bound as `ACCESS_AUD`;
+  - expiry enforced.
 - **Anything else is unauthenticated.**
 
 Every route except `/api/health` requires a principal (`src/http/auth.ts`) and answers `401` without one.
@@ -81,7 +85,7 @@ Authorization is all-or-nothing for now: Access is the allowlist. When roles or 
 
 Under `alchemy dev` no Access resources are created. The API's `dev.access` stub makes every request act as `dev@localhost`.
 
-Rotate the agent token by bumping `clientSecretVersion` on `AgentToken`, then redeploying. Rotate the edge secret by replacing the `EdgeSecret` resource.
+Rotate the agent token by bumping `clientSecretVersion` on `AgentToken`, then redeploying. Access rotates its signing keys itself; the API refetches them as needed.
 
 `public/_headers` sets the CSP for static assets. Set security headers for API responses in the API itself. Keep the deployed CSP strict even if the dev server needs something looser.
 

@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { AccessApp, AgentToken, EdgeSecret, isDev } from "./access.ts";
+import { AccessApp, AgentToken, isDev } from "./access.ts";
 import Api from "./api.ts";
 
 /** A path prefix with leading and trailing slashes, like `/` or `/my-app/`. */
@@ -55,7 +55,7 @@ const { stackName, basePath, prodRoute } = Effect.runSync(DeployConfig);
 
 export const App = Cloudflare.Website.Foldkit("App", {
   main: "src/platform/cloudflare/edge.ts",
-  env: { API: Api, BASE_PATH: basePath, EDGE_SECRET: EdgeSecret },
+  env: { API: Api, BASE_PATH: basePath },
   // Behind Cloudflare Access when deployed (see access.ts); open in local dev.
   ...(isDev ? {} : { access: AccessApp }),
   // Static assets are matched against the full path, so API calls are

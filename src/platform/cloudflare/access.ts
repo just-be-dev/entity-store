@@ -12,8 +12,9 @@ import * as Effect from "effect/Effect";
  * - the `AgentToken` service token (`CF-Access-Client-Id` /
  *   `CF-Access-Client-Secret` headers), for automated testing.
  *
- * Local dev (`alchemy dev`) creates no Access resources; the API simulates a
- * signed-in dev user instead.
+ * The API checks identity itself as well (see identity.ts). Local dev
+ * (`alchemy dev`) creates no Access resources; the API simulates a signed-in
+ * dev user instead.
  */
 
 /** True under `alchemy dev`. Read when the stack module loads, like DeployConfig. */
@@ -60,11 +61,10 @@ export const AccessApp = Cloudflare.Access.Application(
 );
 
 /**
- * Shared by the Website edge and the API. The edge sends it with the
- * principal it forwards over the service binding, so the API can tell a
- * forwarded principal from a forged header.
+ * The Zero Trust team domain, e.g. `team.cloudflareaccess.com`: the issuer of
+ * Access tokens the API verifies. Required to deploy; read at plan time.
  */
-export const EdgeSecret = Alchemy.makeRandom("EdgeSecret");
+export const AccessTeamDomain = Config.String("ACCESS_TEAM_DOMAIN");
 
 /** The identity `alchemy dev` simulates for the API, since there's no Access locally. */
 export const DEV_IDENTITY = { email: "dev@localhost" };
