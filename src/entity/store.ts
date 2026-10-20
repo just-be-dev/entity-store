@@ -7,6 +7,7 @@ import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type { Json, JsonObject } from "../lens/expr.ts";
+import { parse } from "../lens/expr.ts";
 import { compileLens } from "../lens/apply.ts";
 import type { LensReport } from "../lens/check.ts";
 import { checkLens } from "../lens/check.ts";
@@ -15,11 +16,14 @@ import { checkDefinition, compiled } from "../schema/compile.ts";
 import type { Link } from "../schema/links.ts";
 import { diffLinks, extractLinks, linkedTypes } from "../schema/links.ts";
 import type { EntitySchema } from "../schema/model.ts";
+import type { IndexDefinition, LoadedIndex } from "./indexes.ts";
+import { MAX_INDEXES_PER_TYPE, checkIndexDefinition, indexKeys, keysMinus } from "./indexes.ts";
 import type {
   Backlink,
   BacklinkPage,
   Entity,
   EntityPage,
+  IndexInfo,
   LinkProblem,
   HistoryPage,
   Operation,
@@ -33,6 +37,12 @@ import {
   EntityDeleted,
   EntityLinked,
   EntityNotFound,
+  IndexAlreadyExists,
+  IndexKeyFailed,
+  IndexNotFound,
+  IndexNotReady,
+  IndexState,
+  InvalidIndex,
   InvalidLens,
   InvalidSchema,
   LensCheckFailed,
@@ -42,12 +52,14 @@ import {
   RevisionNotFound,
   StorageFailure,
   TypeAlreadyExists,
+  TypeNotFound,
+  UniqueViolation,
   ValidationFailed,
   VersionConflict,
   VersionNotFound,
 } from "./model.ts";
 import { merge3, mergePatch } from "./patch.ts";
-import type { LoadedVersion } from "./registry.ts";
+import type { LoadedIndexes, LoadedVersion } from "./registry.ts";
 import { VersionCache, decodeRows, makeRegistry } from "./registry.ts";
 import type { SqlError, Statement } from "./sql.ts";
 import { SqlDatabase, sql } from "./sql.ts";
@@ -69,6 +81,49 @@ const EntityRow = Schema.Struct({
 });
 type EntityRow = typeof EntityRow.Type;
 
+/** The head row a writer reads, with the type's `indexes_rev`. */
+const HeadRow = Schema.Struct({ ...EntityRow.fields, indexes_rev: Schema.Number });
+
+const IndexRow = Schema.Struct({
+  type: Schema.String,
+  name: Schema.String,
+  generation: Schema.Number,
+  version: Schema.Number,
+  key: Schema.String,
+  is_unique: Schema.Number,
+  state: IndexState,
+  cursor: Schema.String,
+  error: Schema.NullOr(Schema.String),
+  created_at: Schema.Number,
+  updated_at: Schema.Number,
+});
+type IndexRow = typeof IndexRow.Type;
+
+const toIndexInfo = (row: IndexRow): IndexInfo => ({
+  type: row.type,
+  name: row.name,
+  version: row.version,
+  key: row.key,
+  unique: row.is_unique !== 0,
+  state: row.state,
+  ...(row.error === null ? {} : { error: row.error }),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+/**
+ * The type's index definitions changed between the writer's read and its
+ * batch (`index_guard` aborted it). Internal: the write is retried with fresh
+ * definitions, never reported as such.
+ */
+class IndexesChanged extends Schema.TaggedError<IndexesChanged>()("IndexesChanged", {}) {}
+
+/** Data at a stored schema version. */
+interface Stored {
+  readonly version: number;
+  readonly data: Json;
+}
+
 const RevisionRow = Schema.Struct({
   entity_id: Schema.String,
   rev: Schema.Number,
@@ -85,9 +140,9 @@ const storageFailure = (error: SqlError) => new StorageFailure({ message: error.
 
 /** D1 allows 100 bound parameters per statement; stay well under it. */
 const MAX_IN = 90;
-const chunks = <A>(items: ReadonlyArray<A>): Array<ReadonlyArray<A>> =>
-  Array.from({ length: Math.ceil(items.length / MAX_IN) }, (_, i) =>
-    items.slice(i * MAX_IN, (i + 1) * MAX_IN),
+const chunks = <A>(items: ReadonlyArray<A>, size = MAX_IN): Array<ReadonlyArray<A>> =>
+  Array.from({ length: Math.ceil(items.length / size) }, (_, i) =>
+    items.slice(i * size, (i + 1) * size),
   );
 const placeholders = (items: ReadonlyArray<unknown>) => items.map(() => "?").join(", ");
 
@@ -114,10 +169,24 @@ export interface WriteOptions {
   readonly expectedRev?: number | undefined;
 }
 
+export interface CreateIndexInput {
+  readonly name: string;
+  readonly version: number;
+  readonly key: string;
+  readonly unique?: boolean | undefined;
+}
+
 const DEFAULT_PAGE = 50;
 const MAX_PAGE = 200;
 const EXISTING_SAMPLE = 50;
 const WRITE_ATTEMPTS = 8;
+
+/** Entities read per backfill step; each step commits its progress. */
+export const BUILD_PAGE = 500;
+/** Backfill steps run inside the request that creates an index (up to 5000 entities). */
+export const SYNC_BUILD_PAGES = 10;
+/** Entries per backfill insert statement, keeping its JSON parameter well under D1's limits. */
+const BUILD_INSERT_CHUNK = 1000;
 
 // ─── Service ────────────────────────────────────────────────────────────────
 
@@ -134,6 +203,7 @@ export class EntityStore extends Context.Service<
 
 const makeEntityStore = Effect.gen(function* () {
   const db = yield* SqlDatabase;
+  const cache = yield* VersionCache;
   const registry = yield* makeRegistry;
 
   const all = (statement: Statement) => db.all(statement).pipe(Effect.mapError(storageFailure));
@@ -219,17 +289,182 @@ const makeEntityStore = Effect.gen(function* () {
       type: String(row["type"]),
     }));
 
-  /** Translate the link triggers' errors (a lost race with another writer). */
+  /** Translate trigger and constraint errors from an entity write (a lost race with another writer). */
   const writeError =
-    (id: string, onConstraint: () => StoreError) =>
-    (error: SqlError): StoreError =>
-      error.message.includes("LINK_TARGET_INVALID")
-        ? new LinkTargetInvalid({ problems: [] })
-        : error.message.includes("ENTITY_LINKED")
-          ? new EntityLinked({ id, linkedFrom: [] })
-          : error.constraint
-            ? onConstraint()
-            : storageFailure(error);
+    (type: string, id: string, onConstraint: () => StoreError) =>
+    (error: SqlError): StoreError | IndexesChanged => {
+      if (error.message.includes("INDEXES_CHANGED")) {
+        return new IndexesChanged();
+      }
+      if (error.message.includes("LINK_TARGET_INVALID")) {
+        return new LinkTargetInvalid({ problems: [] });
+      }
+      if (error.message.includes("ENTITY_LINKED")) {
+        return new EntityLinked({ id, linkedFrom: [] });
+      }
+      if (error.constraint && error.message.includes("index_entries")) {
+        return new UniqueViolation({ type, conflicts: [] });
+      }
+      return error.constraint ? onConstraint() : storageFailure(error);
+    };
+
+  // \u2500\u2500 Index maintenance \u2500\u2500
+
+  const compileIndex = (row: IndexRow) =>
+    Effect.gen(function* () {
+      const expr = parse(row.key);
+      if (Result.isFailure(expr)) {
+        return yield* new StorageFailure({
+          message: `Stored key of index ${row.type}.${row.name} no longer parses`,
+        });
+      }
+      const loaded: LoadedIndex = {
+        name: row.name,
+        version: row.version,
+        key: row.key,
+        unique: row.is_unique !== 0,
+        state: row.state,
+        generation: row.generation,
+        expr: expr.success,
+      };
+      return loaded;
+    });
+
+  /**
+   * The indexes writers of `type` maintain (building or ready), cached per
+   * `indexes_rev`. The returned `rev` is the one the definitions were read at,
+   * which is what the write's batch must re-check.
+   */
+  const loadIndexes = Effect.fn("EntityStore.loadIndexes")(function* (
+    type: string,
+    knownRev: number,
+  ) {
+    const cached = cache.getIndexes(type);
+    if (cached !== undefined && cached.rev === knownRev) {
+      return cached;
+    }
+    // One query, so the definitions and the rev are a consistent snapshot.
+    const rows = yield* all(
+      sql(
+        "SELECT t.indexes_rev AS rev, i.* FROM entity_types t LEFT JOIN entity_indexes i ON i.type = t.name AND i.state != 'failed' WHERE t.name = ?",
+        type,
+      ),
+    );
+    const first = rows[0];
+    if (first === undefined) {
+      return yield* new TypeNotFound({ type });
+    }
+    const defined = rows.filter((row) => row["name"] !== null && row["name"] !== undefined);
+    const items: Array<LoadedIndex> = [];
+    for (const row of yield* decodeRows(IndexRow, "index")(defined)) {
+      items.push(yield* compileIndex(row));
+    }
+    const loaded: LoadedIndexes = { rev: Number(first["rev"]), items };
+    cache.setIndexes(type, loaded);
+    return loaded;
+  });
+
+  /** Aborts the batch unless the type's index definitions are still at `rev`. */
+  const indexGuard = (type: string, rev: number) =>
+    sql("INSERT INTO index_guard (type, indexes_rev) VALUES (?, ?)", type, rev);
+
+  /** An entity's keys in one index: its data lensed to the index's version, then the key expression. */
+  const keysAt = (type: string, index: LoadedIndex, stored: Stored) =>
+    Effect.gen(function* () {
+      const doc = yield* project(type, stored.data, stored.version, index.version).pipe(
+        Effect.catchTag("ProjectionFailed", (error) =>
+          Effect.fail(new IndexKeyFailed({ type, index: index.name, message: error.message })),
+        ),
+      );
+      const keys = indexKeys(index, doc);
+      if (Result.isFailure(keys)) {
+        return yield* new IndexKeyFailed({ type, index: index.name, message: keys.failure });
+      }
+      return keys.success;
+    });
+
+  const insertEntry = (type: string, id: string, index: LoadedIndex, key: string) =>
+    sql(
+      "INSERT INTO index_entries (type, name, value, entity_id, uniq) VALUES (?, ?, ?, ?, ?) ON CONFLICT (type, name, value, entity_id) DO NOTHING",
+      type,
+      index.name,
+      key,
+      id,
+      index.unique ? 1 : 0,
+    );
+
+  const deleteEntry = (type: string, id: string, index: LoadedIndex, key: string) =>
+    sql(
+      "DELETE FROM index_entries WHERE type = ? AND name = ? AND value = ? AND entity_id = ?",
+      type,
+      index.name,
+      key,
+      id,
+    );
+
+  /**
+   * Index statements for a write that changes an entity from `before` to
+   * `after` (either absent for create/delete), after checking unique keys
+   * with readable conflicts. Only keys that changed are written, except while
+   * an index is building: then every key is (idempotently) written, because
+   * the backfill skips entities whose rev moved under it.
+   */
+  const indexWrites = Effect.fn("EntityStore.indexWrites")(function* (
+    type: string,
+    id: string,
+    indexes: ReadonlyArray<LoadedIndex>,
+    before: Stored | undefined,
+    after: Stored | undefined,
+  ) {
+    const statements: Array<Statement> = [];
+    const inserts: Array<Statement> = [];
+    const claims: Array<{ readonly index: LoadedIndex; readonly key: string }> = [];
+    for (const index of indexes) {
+      // Keys that can't be computed for the old data were never stored (the
+      // write or backfill that would have stored them failed), so there's
+      // nothing to remove.
+      const old =
+        before === undefined
+          ? []
+          : yield* keysAt(type, index, before).pipe(
+              Effect.catchTag("IndexKeyFailed", () => Effect.succeed([])),
+            );
+      const next = after === undefined ? [] : yield* keysAt(type, index, after);
+      const fresh = keysMinus(next, old);
+      statements.push(...keysMinus(old, next).map((key) => deleteEntry(type, id, index, key)));
+      inserts.push(
+        ...(index.state === "building" ? next : fresh).map((key) =>
+          insertEntry(type, id, index, key),
+        ),
+      );
+      if (index.unique) {
+        claims.push(...fresh.map((key) => ({ index, key })));
+      }
+    }
+    const conflicts: Array<UniqueViolation["conflicts"][number]> = [];
+    for (const group of chunks(claims, 40)) {
+      const rows = yield* all(
+        sql(
+          `SELECT name, value, entity_id FROM index_entries WHERE type = ? AND uniq = 1 AND entity_id != ? AND (${group.map(() => "(name = ? AND value = ?)").join(" OR ")})`,
+          type,
+          id,
+          ...group.flatMap((claim) => [claim.index.name, claim.key]),
+        ),
+      );
+      conflicts.push(
+        ...rows.map((row) => ({
+          index: String(row["name"]),
+          key: String(row["value"]),
+          id: String(row["entity_id"]),
+        })),
+      );
+    }
+    if (conflicts.length > 0) {
+      return yield* new UniqueViolation({ type, conflicts });
+    }
+    // Removals first, so a key moving between this entity's indexes never collides.
+    return [...statements, ...inserts];
+  });
 
   // ── Projection: run lenses between versions, then validate the result ──
 
@@ -482,11 +717,11 @@ const makeEntityStore = Effect.gen(function* () {
   const readRow = Effect.fn("EntityStore.readRow")(function* (id: string) {
     const rows = yield* all(
       sql(
-        "SELECT e.*, t.latest_version FROM entities e JOIN entity_types t ON t.name = e.type WHERE e.id = ?",
+        "SELECT e.*, t.latest_version, t.indexes_rev FROM entities e JOIN entity_types t ON t.name = e.type WHERE e.id = ?",
         id,
       ),
     );
-    const [row] = yield* decodeRows(EntityRow, "entity")(rows);
+    const [row] = yield* decodeRows(HeadRow, "entity")(rows);
     if (row === undefined) {
       return yield* new EntityNotFound({ id });
     }
@@ -534,28 +769,41 @@ const makeEntityStore = Effect.gen(function* () {
     type: string,
     input: { readonly id?: string | undefined; readonly version: number; readonly data: unknown },
   ) {
-    const summary = yield* registry.getType(type);
+    const { summary, indexesRev } = yield* registry.typeState(type);
     yield* requireVersion(type, input.version, summary.latestVersion);
     const data = yield* validate(type, input.version, input.data);
     const id = input.id ?? (yield* newId);
     const links = yield* linksOf(type, input.version, data);
     yield* checkTargets(links, { id, type });
     const now = yield* Clock.currentTimeMillis;
-    yield* db
-      .batch([
-        sql(
-          "INSERT INTO entities (id, type, version, rev, data, deleted, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 0, ?, ?)",
-          id,
-          type,
-          input.version,
-          JSON.stringify(data),
-          now,
-          now,
-        ),
-        appendRevision(id, 1, input.version, "create"),
-        ...links.map((link) => insertLink(id, link)),
-      ])
-      .pipe(Effect.mapError(writeError(id, () => new EntityAlreadyExists({ id }))));
+    let attempt = 0;
+    yield* retryOnIndexChange(
+      Effect.gen(function* () {
+        // A retry means the definitions changed: never trust the cache for it.
+        const indexes = yield* loadIndexes(type, attempt++ === 0 ? indexesRev : -1);
+        const entries = yield* indexWrites(type, id, indexes.items, undefined, {
+          version: input.version,
+          data,
+        });
+        yield* db
+          .batch([
+            indexGuard(type, indexes.rev),
+            sql(
+              "INSERT INTO entities (id, type, version, rev, data, deleted, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 0, ?, ?)",
+              id,
+              type,
+              input.version,
+              JSON.stringify(data),
+              now,
+              now,
+            ),
+            appendRevision(id, 1, input.version, "create"),
+            ...links.map((link) => insertLink(id, link)),
+            ...entries,
+          ])
+          .pipe(Effect.mapError(writeError(type, id, () => new EntityAlreadyExists({ id }))));
+      }),
+    );
     const entity: Entity = {
       id: id as Entity["id"],
       type,
@@ -635,7 +883,15 @@ const makeEntityStore = Effect.gen(function* () {
         limit + 1,
       ),
     );
-    const decoded = yield* decodeRows(EntityRow, "entity")(rows);
+    return yield* presentPage(yield* decodeRows(EntityRow, "entity")(rows), limit, version);
+  });
+
+  /** A page of entity rows (fetched with one extra to detect more) presented at `version`. */
+  const presentPage = Effect.fn("EntityStore.presentPage")(function* (
+    decoded: ReadonlyArray<EntityRow>,
+    limit: number,
+    version: number,
+  ) {
     const pageRows = decoded.slice(0, limit);
     const items: Array<Entity> = [];
     const failures: Array<EntityPage["failures"][number]> = [];
@@ -727,14 +983,25 @@ const makeEntityStore = Effect.gen(function* () {
         }
       }
 
+      const indexes = yield* loadIndexes(row.type, row.indexes_rev);
+      const entries = yield* indexWrites(
+        row.type,
+        id,
+        indexes.items,
+        { version: row.version, data: row.data },
+        op === "delete" ? undefined : { version: storedVersion, data: stored },
+      );
+
       const now = yield* Clock.currentTimeMillis;
       const nextRev = row.rev + 1;
       const json = JSON.stringify(stored);
-      // The revision insert goes first: revisions are contiguous, so its primary
+      // The guard aborts the batch if index definitions changed since they were
+      // read. Then the revision insert: revisions are contiguous, so its primary
       // key fails (aborting the whole batch) iff another write already moved
       // the entity past the rev we read. Everything after it is safe to apply.
       const results = yield* db
         .batch([
+          indexGuard(row.type, indexes.rev),
           sql(
             "INSERT INTO entity_revisions (entity_id, rev, version, writer_version, op, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             id,
@@ -759,16 +1026,18 @@ const makeEntityStore = Effect.gen(function* () {
             row.rev,
           ),
           ...links.added.map((link) => insertLink(id, link)),
+          ...entries,
         ])
         .pipe(
           Effect.mapError(
             writeError(
+              row.type,
               id,
               () => new RevConflict({ id, expectedRev: row.rev, currentRev: nextRev }),
             ),
           ),
         );
-      if (results[1 + links.removed.length]?.changes !== 1) {
+      if (results[2 + links.removed.length]?.changes !== 1) {
         return yield* new StorageFailure({
           message: "Entity update matched no row after its revision was recorded",
         });
@@ -792,7 +1061,30 @@ const makeEntityStore = Effect.gen(function* () {
         times: options.expectedRev === undefined ? WRITE_ATTEMPTS - 1 : 0,
         while: (error) => error._tag === "RevConflict",
       }),
+      retryOnIndexChange,
     );
+
+  /**
+   * Every write, including ones with `expectedRev`, retries when index
+   * definitions changed under it: that isn't a conflict the caller caused.
+   */
+  function retryOnIndexChange<A, E, R>(
+    write: Effect.Effect<A, E | IndexesChanged, R>,
+  ): Effect.Effect<A, Exclude<E, IndexesChanged> | StorageFailure, R> {
+    return write.pipe(
+      Effect.retry({
+        times: WRITE_ATTEMPTS - 1,
+        while: (error) => error instanceof IndexesChanged,
+      }),
+      Effect.catchIf(
+        (error): error is IndexesChanged => error instanceof IndexesChanged,
+        () =>
+          Effect.fail(
+            new StorageFailure({ message: "Index definitions kept changing; try again" }),
+          ),
+      ),
+    ) as Effect.Effect<A, Exclude<E, IndexesChanged> | StorageFailure, R>;
+  }
 
   const replace = Effect.fn("EntityStore.replace")(function* (
     id: string,
@@ -958,6 +1250,354 @@ const makeEntityStore = Effect.gen(function* () {
     return page;
   });
 
+  // \u2500\u2500 Indexes \u2500\u2500
+
+  const readIndexRow = Effect.fn("EntityStore.readIndexRow")(function* (
+    type: string,
+    name: string,
+  ) {
+    const rows = yield* all(
+      sql("SELECT * FROM entity_indexes WHERE type = ? AND name = ?", type, name),
+    );
+    const [row] = yield* decodeRows(IndexRow, "index")(rows);
+    if (row === undefined) {
+      yield* registry.getType(type);
+      return yield* new IndexNotFound({ type, index: name });
+    }
+    return row;
+  });
+
+  const listIndexes = Effect.fn("EntityStore.listIndexes")(function* (type: string) {
+    yield* registry.getType(type);
+    const rows = yield* all(sql("SELECT * FROM entity_indexes WHERE type = ? ORDER BY name", type));
+    return (yield* decodeRows(IndexRow, "index")(rows)).map(toIndexInfo);
+  });
+
+  const getIndex = Effect.fn("EntityStore.getIndex")(function* (type: string, name: string) {
+    return toIndexInfo(yield* readIndexRow(type, name));
+  });
+
+  /**
+   * Define an index pinned to `input.version`, then backfill existing entities
+   * for up to {@link SYNC_BUILD_PAGES} steps. Larger types finish in the
+   * background ({@link buildPendingIndexes}); the index answers lookups once
+   * it's `ready`.
+   */
+  const createIndex = Effect.fn("EntityStore.createIndex")(function* (
+    type: string,
+    input: CreateIndexInput,
+  ) {
+    const summary = yield* registry.getType(type);
+    yield* requireVersion(type, input.version, summary.latestVersion);
+    const definition: IndexDefinition = {
+      name: input.name,
+      version: input.version,
+      key: input.key,
+      unique: input.unique === true,
+    };
+    const pinned = yield* registry.version(type, input.version);
+    const checked = checkIndexDefinition(definition, pinned.info.schema);
+    if (Result.isFailure(checked)) {
+      return yield* new InvalidIndex({ issues: checked.failure });
+    }
+    const [count] = yield* all(
+      sql("SELECT count(*) AS n FROM entity_indexes WHERE type = ?", type),
+    );
+    if (Number(count?.["n"] ?? 0) >= MAX_INDEXES_PER_TYPE) {
+      return yield* new InvalidIndex({
+        issues: [{ path: "", message: `A type may have at most ${MAX_INDEXES_PER_TYPE} indexes` }],
+      });
+    }
+    const now = yield* Clock.currentTimeMillis;
+    // Bumping indexes_rev makes every in-flight write re-read the definitions,
+    // so no write can commit without maintaining the new index.
+    yield* db
+      .batch([
+        sql(
+          "INSERT INTO entity_indexes (type, name, generation, version, key, is_unique, state, cursor, error, created_at, updated_at) SELECT name, ?, indexes_rev + 1, ?, ?, ?, 'building', '', NULL, ?, ? FROM entity_types WHERE name = ?",
+          input.name,
+          input.version,
+          input.key,
+          definition.unique ? 1 : 0,
+          now,
+          now,
+          type,
+        ),
+        sql("UPDATE entity_types SET indexes_rev = indexes_rev + 1 WHERE name = ?", type),
+      ])
+      .pipe(
+        Effect.mapError((error) =>
+          error.constraint
+            ? new IndexAlreadyExists({ type, index: input.name })
+            : storageFailure(error),
+        ),
+      );
+    return yield* buildIndex(type, input.name, { steps: SYNC_BUILD_PAGES });
+  });
+
+  /** Drop an index and its entries. Writers stop maintaining it immediately. */
+  const dropIndex = Effect.fn("EntityStore.dropIndex")(function* (type: string, name: string) {
+    yield* readIndexRow(type, name);
+    yield* db
+      .batch([
+        sql("DELETE FROM entity_indexes WHERE type = ? AND name = ?", type, name),
+        sql("DELETE FROM index_entries WHERE type = ? AND name = ?", type, name),
+        sql("UPDATE entity_types SET indexes_rev = indexes_rev + 1 WHERE name = ?", type),
+      ])
+      .pipe(Effect.mapError(storageFailure));
+    return { type, name };
+  });
+
+  /** `SELECT 1 \u2026` matching the index while it's still this generation in `state`. */
+  const sameIndex = (row: IndexRow, state: IndexState) =>
+    sql(
+      "SELECT 1 FROM entity_indexes x WHERE x.type = ? AND x.name = ? AND x.generation = ? AND x.state = ?",
+      row.type,
+      row.name,
+      row.generation,
+      state,
+    );
+
+  const failIndex = Effect.fn("EntityStore.failIndex")(function* (row: IndexRow, message: string) {
+    const now = yield* Clock.currentTimeMillis;
+    const failed = sameIndex(row, "failed");
+    yield* db
+      .batch([
+        sql(
+          "UPDATE entity_indexes SET state = 'failed', error = ?, updated_at = ? WHERE type = ? AND name = ? AND generation = ? AND state = 'building'",
+          message,
+          now,
+          row.type,
+          row.name,
+          row.generation,
+        ),
+        // A failed index isn't maintained, so its entries go, and writers re-read definitions.
+        sql(
+          `DELETE FROM index_entries WHERE type = ? AND name = ? AND EXISTS (${failed.sql})`,
+          row.type,
+          row.name,
+          ...failed.params,
+        ),
+        sql(
+          `UPDATE entity_types SET indexes_rev = indexes_rev + 1 WHERE name = ? AND EXISTS (${failed.sql})`,
+          row.type,
+          ...failed.params,
+        ),
+      ])
+      .pipe(Effect.mapError(storageFailure));
+    return toIndexInfo(yield* readIndexRow(row.type, row.name));
+  });
+
+  /** Who already holds one of `keys` in a unique index, other than the entity claiming it. */
+  const findDuplicate = Effect.fn("EntityStore.findDuplicate")(function* (
+    row: IndexRow,
+    claims: ReadonlyArray<readonly [key: string, id: string]>,
+  ) {
+    const claimant = new Map(claims);
+    for (const group of chunks([...claimant.keys()], 80)) {
+      const held = yield* all(
+        sql(
+          `SELECT value, entity_id FROM index_entries WHERE type = ? AND name = ? AND value IN (${placeholders(group)})`,
+          row.type,
+          row.name,
+          ...group,
+        ),
+      );
+      for (const entry of held) {
+        const key = String(entry["value"]);
+        const holder = String(entry["entity_id"]);
+        const other = claimant.get(key);
+        if (other !== undefined && other !== holder) {
+          return `'${key}' is the key of both ${holder} and ${other}`;
+        }
+      }
+    }
+    return undefined;
+  });
+
+  /**
+   * Backfill an index for up to `steps` pages of existing entities, resuming
+   * from its saved cursor. Each step commits its entries and progress
+   * together, and it's safe to run concurrently or repeatedly:
+   * - entries are only inserted while the entity is still at the rev read
+   *   (writers maintain building indexes themselves, so a skipped entity is
+   *   already covered), and only while this generation is still building;
+   * - entries that already exist are left alone.
+   * A key that can't be computed, or a duplicate in a unique index, fails the
+   * index with the reason.
+   */
+  const buildIndex = Effect.fn("EntityStore.buildIndex")(function* (
+    type: string,
+    name: string,
+    options: { readonly steps: number },
+  ) {
+    for (let step = 0; step < options.steps; step++) {
+      const row = yield* readIndexRow(type, name);
+      if (row.state !== "building") {
+        return toIndexInfo(row);
+      }
+      const index = yield* compileIndex(row);
+      const rows = yield* all(
+        sql(
+          "SELECT id, version, rev, data FROM entities WHERE type = ? AND id > ? AND deleted = 0 ORDER BY id LIMIT ?",
+          type,
+          row.cursor,
+          BUILD_PAGE,
+        ),
+      );
+      const page = yield* decodeRows(
+        Schema.Struct({
+          id: Schema.String,
+          version: Schema.Number,
+          rev: Schema.Number,
+          data: StoredJson,
+        }),
+        "entity",
+      )(rows);
+
+      const entries: Array<readonly [key: string, id: string, rev: number]> = [];
+      const claimed = new Map<string, string>();
+      for (const entity of page) {
+        const keys = yield* Effect.result(keysAt(type, index, entity));
+        if (Result.isFailure(keys)) {
+          if (keys.failure._tag === "IndexKeyFailed") {
+            return yield* failIndex(row, `entity '${entity.id}': ${keys.failure.message}`);
+          }
+          return yield* keys.failure;
+        }
+        for (const key of keys.success) {
+          const other = claimed.get(key);
+          if (index.unique && other !== undefined) {
+            return yield* failIndex(row, `'${key}' is the key of both ${other} and ${entity.id}`);
+          }
+          claimed.set(key, entity.id);
+          entries.push([key, entity.id, entity.rev]);
+        }
+      }
+
+      const done = page.length < BUILD_PAGE;
+      const now = yield* Clock.currentTimeMillis;
+      const building = sameIndex(row, "building");
+      const result = yield* Effect.result(
+        db.batch([
+          ...chunks(entries, BUILD_INSERT_CHUNK).map((group) =>
+            sql(
+              `INSERT INTO index_entries (type, name, value, entity_id, uniq) SELECT ?, ?, json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]'), ? FROM json_each(?) j WHERE EXISTS (SELECT 1 FROM entities e WHERE e.id = json_extract(j.value, '$[1]') AND e.rev = json_extract(j.value, '$[2]') AND e.deleted = 0) AND EXISTS (${building.sql}) ON CONFLICT (type, name, value, entity_id) DO NOTHING`,
+              type,
+              name,
+              index.unique ? 1 : 0,
+              JSON.stringify(group),
+              ...building.params,
+            ),
+          ),
+          sql(
+            "UPDATE entity_indexes SET cursor = ?, state = ?, updated_at = ? WHERE type = ? AND name = ? AND generation = ? AND state = 'building'",
+            page[page.length - 1]?.id ?? row.cursor,
+            done ? "ready" : "building",
+            now,
+            type,
+            name,
+            row.generation,
+          ),
+        ]),
+      );
+      if (Result.isFailure(result)) {
+        if (!result.failure.constraint) {
+          return yield* storageFailure(result.failure);
+        }
+        // Another entity (written since this page was read) holds a key in a unique index.
+        const duplicate = yield* findDuplicate(
+          row,
+          entries.map(([key, id]) => [key, id] as const),
+        );
+        if (duplicate !== undefined) {
+          return yield* failIndex(row, duplicate);
+        }
+        // The holder changed its key since; retry the page on the next step.
+        continue;
+      }
+      if (done) {
+        break;
+      }
+    }
+    return yield* getIndex(type, name);
+  });
+
+  /** Continue every building index for a bounded number of steps each. Called on a schedule. */
+  const buildPendingIndexes = Effect.fn("EntityStore.buildPendingIndexes")(function* (options: {
+    readonly steps: number;
+    readonly maxIndexes: number;
+  }) {
+    const rows = yield* all(
+      sql(
+        "SELECT type, name FROM entity_indexes WHERE state = 'building' ORDER BY updated_at LIMIT ?",
+        options.maxIndexes,
+      ),
+    );
+    const out: Array<IndexInfo> = [];
+    for (const row of rows) {
+      const built = yield* Effect.result(
+        buildIndex(String(row["type"]), String(row["name"]), { steps: options.steps }),
+      );
+      if (Result.isSuccess(built)) {
+        out.push(built.success);
+      } else if (built.failure._tag !== "IndexNotFound") {
+        yield* Effect.logWarning("Index backfill step failed");
+      }
+    }
+    return out;
+  });
+
+  /** Entities whose key in a ready index is `key`, ordered by id, presented at `version`. */
+  const lookup = Effect.fn("EntityStore.lookup")(function* (
+    type: string,
+    name: string,
+    key: string,
+    options?: {
+      readonly version?: number | undefined;
+      readonly cursor?: string | undefined;
+      readonly limit?: number | undefined;
+    },
+  ) {
+    const [head] = yield* all(
+      sql(
+        "SELECT t.latest_version, i.state FROM entity_types t LEFT JOIN entity_indexes i ON i.type = t.name AND i.name = ? WHERE t.name = ?",
+        name,
+        type,
+      ),
+    );
+    if (head === undefined) {
+      return yield* new TypeNotFound({ type });
+    }
+    const state = head["state"];
+    if (state === null || state === undefined) {
+      return yield* new IndexNotFound({ type, index: name });
+    }
+    if (state !== "ready") {
+      return yield* new IndexNotReady({
+        type,
+        index: name,
+        state: state === "failed" ? "failed" : "building",
+      });
+    }
+    const latest = Number(head["latest_version"]);
+    const version = options?.version ?? latest;
+    yield* requireVersion(type, version, latest);
+    const limit = Math.max(1, Math.min(options?.limit ?? DEFAULT_PAGE, MAX_PAGE));
+    const rows = yield* all(
+      sql(
+        "SELECT e.*, ? AS latest_version FROM index_entries x JOIN entities e ON e.id = x.entity_id WHERE x.type = ? AND x.name = ? AND x.value = ? AND x.entity_id > ? AND e.deleted = 0 ORDER BY x.entity_id LIMIT ?",
+        latest,
+        type,
+        name,
+        key,
+        options?.cursor ?? "",
+        limit + 1,
+      ),
+    );
+    return yield* presentPage(yield* decodeRows(EntityRow, "entity")(rows), limit, version);
+  });
+
   return {
     createType,
     listTypes,
@@ -974,6 +1614,13 @@ const makeEntityStore = Effect.gen(function* () {
     history,
     resolveLinks,
     backlinks,
+    listIndexes,
+    getIndex,
+    createIndex,
+    dropIndex,
+    buildIndex,
+    buildPendingIndexes,
+    lookup,
   };
 });
 

@@ -1,7 +1,13 @@
 import * as Schema from "effect/Schema";
 import { LensReport } from "../lens/check.ts";
 import { Lens } from "../lens/model.ts";
-import { ENTITY_ID_PATTERN, EntitySchema, TypeName, Version } from "../schema/model.ts";
+import {
+  ENTITY_ID_PATTERN,
+  EntitySchema,
+  TYPE_NAME_PATTERN,
+  TypeName,
+  Version,
+} from "../schema/model.ts";
 
 // ─── IDs ────────────────────────────────────────────────────────────────────
 
@@ -125,6 +131,44 @@ export const LinkProblem = Schema.Struct({
 });
 export type LinkProblem = typeof LinkProblem.Type;
 
+// ─── Indexes ────────────────────────────────────────────────────────────────
+
+/** Index names follow the same rules as type names, so they're safe in URLs. */
+export const IndexName = Schema.String.check(
+  Schema.isPattern(TYPE_NAME_PATTERN, {
+    message: "Index names start with a letter and use letters, digits, '_' or '-' (max 64)",
+  }),
+);
+export type IndexName = typeof IndexName.Type;
+
+/** `building` while existing entities are backfilled; lookups need `ready`. */
+export const IndexState = Schema.Literals(["building", "ready", "failed"]);
+export type IndexState = typeof IndexState.Type;
+
+export const IndexInfo = Schema.Struct({
+  type: TypeName,
+  name: IndexName,
+  /** The schema version keys are computed at. */
+  version: Version,
+  /** Expression evaluated against the entity's data at `version`. */
+  key: Schema.String,
+  unique: Schema.Boolean,
+  state: IndexState,
+  /** Why the backfill failed (state `failed`). */
+  error: Schema.optionalKey(Schema.String),
+  createdAt: Schema.Finite,
+  updatedAt: Schema.Finite,
+});
+export type IndexInfo = typeof IndexInfo.Type;
+
+/** A key a write tried to claim in a unique index, and who holds it (unknown after a race). */
+export const UniqueConflict = Schema.Struct({
+  index: Schema.String,
+  key: Schema.String,
+  id: Schema.optionalKey(Schema.String),
+});
+export type UniqueConflict = typeof UniqueConflict.Type;
+
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 export class TypeNotFound extends Schema.TaggedError<TypeNotFound>()("TypeNotFound", {
@@ -211,6 +255,40 @@ export class EntityLinked extends Schema.TaggedError<EntityLinked>()("EntityLink
   linkedFrom: Schema.Array(Backlink),
 }) {}
 
+export class InvalidIndex extends Schema.TaggedError<InvalidIndex>()("InvalidIndex", {
+  issues: Schema.Array(Issue),
+}) {}
+
+export class IndexAlreadyExists extends Schema.TaggedError<IndexAlreadyExists>()(
+  "IndexAlreadyExists",
+  { type: Schema.String, index: Schema.String },
+) {}
+
+export class IndexNotFound extends Schema.TaggedError<IndexNotFound>()("IndexNotFound", {
+  type: Schema.String,
+  index: Schema.String,
+}) {}
+
+/** The index is still backfilling, or its backfill failed. */
+export class IndexNotReady extends Schema.TaggedError<IndexNotReady>()("IndexNotReady", {
+  type: Schema.String,
+  index: Schema.String,
+  state: IndexState,
+}) {}
+
+/** An index key couldn't be computed for the written data, so the write was refused. */
+export class IndexKeyFailed extends Schema.TaggedError<IndexKeyFailed>()("IndexKeyFailed", {
+  type: Schema.String,
+  index: Schema.String,
+  message: Schema.String,
+}) {}
+
+/** The write would give a unique index key to a second entity. */
+export class UniqueViolation extends Schema.TaggedError<UniqueViolation>()("UniqueViolation", {
+  type: Schema.String,
+  conflicts: Schema.Array(UniqueConflict),
+}) {}
+
 /** Storage misbehaved or returned data that no longer decodes. */
 export class StorageFailure extends Schema.TaggedError<StorageFailure>()("StorageFailure", {
   message: Schema.String,
@@ -233,4 +311,10 @@ export type StoreError =
   | ProjectionFailed
   | LinkTargetInvalid
   | EntityLinked
+  | InvalidIndex
+  | IndexAlreadyExists
+  | IndexNotFound
+  | IndexNotReady
+  | IndexKeyFailed
+  | UniqueViolation
   | StorageFailure;

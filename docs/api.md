@@ -6,13 +6,16 @@ All routes live under `/api`, take and return JSON, and return errors as
 | Status | `code`                                                                               |
 | ------ | ------------------------------------------------------------------------------------ |
 | 400    | `BadRequest` (malformed JSON, body doesn't match the route's shape, bad query param) |
-| 404    | `TypeNotFound`, `VersionNotFound`, `EntityNotFound`, `RevisionNotFound`              |
+| 404    | `TypeNotFound`, `VersionNotFound`, `EntityNotFound`, `RevisionNotFound`,             |
+|        | `IndexNotFound`                                                                      |
 | 409    | `TypeAlreadyExists`, `EntityAlreadyExists`, `VersionConflict`, `RevConflict`,        |
-|        | `EntityLinked` (`linkedFrom`)                                                        |
+|        | `EntityLinked` (`linkedFrom`), `IndexAlreadyExists`, `IndexNotReady` (`state`),      |
+|        | `UniqueViolation` (`conflicts`)                                                      |
 | 410    | `EntityDeleted` (`rev` = the delete revision)                                        |
 | 413    | `BadRequest` (body too large)                                                        |
 | 422    | `InvalidSchema`/`InvalidLens` (`issues`), `LensCheckFailed` (`report`),              |
-|        | `ValidationFailed`, `ProjectionFailed`, `LinkTargetInvalid` (`problems`)             |
+|        | `ValidationFailed`, `ProjectionFailed`, `LinkTargetInvalid` (`problems`),            |
+|        | `InvalidIndex` (`issues`), `IndexKeyFailed`                                          |
 | 500    | `StorageFailure`                                                                     |
 
 ## Entity types and schema versions
@@ -54,7 +57,8 @@ type LensReport = {
 
 | Method & path                     | Body / query                       | Returns                                                  |
 | --------------------------------- | ---------------------------------- | -------------------------------------------------------- |
-| `GET /api/types/:type/entities`   | `?version&cursor&limit` (≤ 200)    | `{ items: Entity[], failures, nextCursor? }`             |
+| `GET /api/types/:type/entities`   | `?version&cursor&limit` (≤ 200),   | `{ items: Entity[], failures, nextCursor? }`             |
+|                                   | `&index&eq` to look up by key      |                                                          |
 | `POST /api/types/:type/entities`  | `{ id?, version, data }`           | `201 Entity`                                             |
 | `GET /api/entities/:id`           | `?version&rev`                     | `Entity`                                                 |
 | `PUT /api/entities/:id`           | `{ version, data, expectedRev? }`  | `Entity` (presented at `version`)                        |
@@ -92,6 +96,43 @@ type Revision = {
   entities link here.
 - `failures` lists entities/revisions whose data couldn't be lensed to the
   requested version, instead of failing the whole page.
+
+## Indexes
+
+| Method & path                               | Body                              | Returns                            |
+| ------------------------------------------- | --------------------------------- | ---------------------------------- |
+| `GET /api/types/:type/indexes`              |                                   | `{ items: IndexInfo[] }`           |
+| `POST /api/types/:type/indexes`             | `{ name, version, key, unique? }` | `201 IndexInfo`                    |
+| `GET /api/types/:type/indexes/:name`        |                                   | `IndexInfo`                        |
+| `DELETE /api/types/:type/indexes/:name`     |                                   | `{ type, name }`                   |
+| `POST /api/types/:type/indexes/:name/build` |                                   | `IndexInfo` (after a backfill run) |
+
+```ts
+type IndexInfo = {
+  type;
+  name;
+  version;
+  key;
+  unique;
+  state: "building" | "ready" | "failed";
+  error?; // why the backfill failed
+  createdAt;
+  updatedAt;
+};
+type UniqueConflict = { index; key; id? }; // id is absent if another writer won a race
+```
+
+- `GET /api/types/person/entities?index=email&eq=ada%40example.com` lists
+  entities whose key is exactly `eq`, ordered by id, with the usual
+  `version`, `cursor`, `limit`, and `include=links`. `index` and `eq` go
+  together. `eq=` (empty) is a real key.
+- `POST .../indexes` backfills up to 5000 existing entities before it returns.
+  Larger types come back `building` and finish in the background. `build`
+  runs another bounded batch of steps now.
+- A write whose key can't be computed fails with `422 IndexKeyFailed`. A write
+  that takes a unique key another entity holds fails with `409 UniqueViolation`.
+
+See [data model](data-model.md#indexes) for key rules, pinning, and costs.
 
 ## Authoring helpers (no storage)
 

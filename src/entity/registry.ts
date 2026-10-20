@@ -9,6 +9,7 @@ import { Lens } from "../lens/model.ts";
 import type { CompiledSchema } from "../schema/compile.ts";
 import { compiled } from "../schema/compile.ts";
 import { EntitySchema } from "../schema/model.ts";
+import type { LoadedIndex } from "./indexes.ts";
 import type { TypeSummary, VersionInfo } from "./model.ts";
 import { StorageFailure, TypeNotFound, VersionNotFound } from "./model.ts";
 import { SqlDatabase, sql } from "./sql.ts";
@@ -23,20 +24,31 @@ export interface LoadedVersion {
 
 const MAX_CACHED = 2000;
 
+/** The indexes writers maintain for a type, as of one `indexes_rev`. */
+export interface LoadedIndexes {
+  readonly rev: number;
+  readonly items: ReadonlyArray<LoadedIndex>;
+}
+
 /**
- * Compiled schema versions, shared across requests for the isolate's lifetime.
- * Versions are immutable once written, so entries never go stale; only the
- * latest-version pointer is read from storage each time.
+ * Compiled schema versions and index definitions, shared across requests for
+ * the isolate's lifetime. Versions are immutable once written, so entries
+ * never go stale; only the latest-version pointer is read from storage each
+ * time. Index definitions are keyed by the type's `indexes_rev`, which every
+ * write reads with the entity and re-checks in its batch.
  */
 export class VersionCache extends Context.Service<
   VersionCache,
   {
     readonly get: (type: string, version: number) => LoadedVersion | undefined;
     readonly set: (loaded: LoadedVersion) => void;
+    readonly getIndexes: (type: string) => LoadedIndexes | undefined;
+    readonly setIndexes: (type: string, indexes: LoadedIndexes) => void;
   }
 >()("entity-store/VersionCache") {
   static readonly make = () => {
     const entries = new Map<string, LoadedVersion>();
+    const indexes = new Map<string, LoadedIndexes>();
     const key = (type: string, version: number) => `${type}\u0000${version}`;
     return VersionCache.of({
       get: (type, version) => entries.get(key(type, version)),
@@ -45,6 +57,13 @@ export class VersionCache extends Context.Service<
           entries.clear();
         }
         entries.set(key(loaded.info.type, loaded.info.version), loaded);
+      },
+      getIndexes: (type) => indexes.get(type),
+      setIndexes: (type, loaded) => {
+        if (indexes.size >= MAX_CACHED) {
+          indexes.clear();
+        }
+        indexes.set(type, loaded);
       },
     });
   };
@@ -55,6 +74,7 @@ const TypeRow = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
   latest_version: Schema.Number,
+  indexes_rev: Schema.Number,
   created_at: Schema.Number,
   updated_at: Schema.Number,
 });
@@ -103,7 +123,8 @@ export const makeRegistry = Effect.gen(function* () {
     return (yield* decodeRows(TypeRow, "type")(rows)).map(toSummary);
   });
 
-  const getType = Effect.fn("Registry.getType")(function* (name: string) {
+  /** A type with the `indexes_rev` its writers must check. */
+  const typeState = Effect.fn("Registry.typeState")(function* (name: string) {
     const rows = yield* db
       .all(sql("SELECT * FROM entity_types WHERE name = ?", name))
       .pipe(Effect.mapError(storageFailure));
@@ -111,7 +132,11 @@ export const makeRegistry = Effect.gen(function* () {
     if (row === undefined) {
       return yield* new TypeNotFound({ type: name });
     }
-    return toSummary(row);
+    return { summary: toSummary(row), indexesRev: row.indexes_rev };
+  });
+
+  const getType = Effect.fn("Registry.getType")(function* (name: string) {
+    return (yield* typeState(name)).summary;
   });
 
   const toLoaded = (row: typeof VersionRow.Type) =>
@@ -193,7 +218,7 @@ export const makeRegistry = Effect.gen(function* () {
     return loaded;
   });
 
-  return { listTypes, getType, versions, version };
+  return { listTypes, typeState, getType, versions, version };
 });
 
 export type Registry = Effect.Success<typeof makeRegistry>;
