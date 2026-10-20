@@ -15,7 +15,7 @@
 
 ## Security
 
-- The API is public on its workers.dev URL and through the Website. Add verified identity and authorization that covers both before exposing protected data.
+- The API is reachable on its workers.dev URL and through the Website. Both Workers are behind Cloudflare Access, and the API requires a verified principal on every route except health. Keep both checks when adding entry points.
 - Keep the persisted Worker logs and traces and the API's `Cloudflare.Telemetry` layer. Tune sampling and retention for your traffic. Never put secrets, auth headers, payloads, or personal data in logs or spans.
 - Cap API request bodies (32 KB is a sensible default) and return errors as `{ "error": string }`. Test both sides of the limit.
 - If the app accepts outbound URLs, guard against SSRF both when validating and right before sending: HTTPS only, no embedded credentials, no private or loopback destinations, and a clear policy for redirects and DNS.

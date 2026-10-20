@@ -42,6 +42,9 @@ const nestingDepth = (text: string): number => {
   return max;
 };
 
+/** The request has no verified principal. */
+export class Unauthenticated extends Schema.TaggedError<Unauthenticated>()("Unauthenticated", {}) {}
+
 /** A request the HTTP layer rejects before it reaches an application operation. */
 export class BadRequest extends Schema.TaggedError<BadRequest>()("BadRequest", {
   status: Schema.Int,
@@ -108,10 +111,14 @@ export const stringParam = (name: string) =>
     return value === null || value === "" ? undefined : value;
   });
 
-const statusOf = (error: StoreError | BadRequest): number => {
+export type HttpError = StoreError | BadRequest | Unauthenticated;
+
+const statusOf = (error: HttpError): number => {
   switch (error._tag) {
     case "BadRequest":
       return error.status;
+    case "Unauthenticated":
+      return 401;
     case "TypeNotFound":
     case "VersionNotFound":
     case "EntityNotFound":
@@ -143,10 +150,12 @@ const statusOf = (error: StoreError | BadRequest): number => {
   }
 };
 
-const messageOf = (error: StoreError | BadRequest): string => {
+const messageOf = (error: HttpError): string => {
   switch (error._tag) {
     case "BadRequest":
       return error.message;
+    case "Unauthenticated":
+      return "Sign in through Cloudflare Access to use this API";
     case "TypeNotFound":
       return `No entity type named '${error.type}'`;
     case "TypeAlreadyExists":
@@ -204,7 +213,7 @@ const messageOf = (error: StoreError | BadRequest): string => {
   }
 };
 
-const detailsOf = (error: StoreError | BadRequest): Record<string, unknown> => {
+const detailsOf = (error: HttpError): Record<string, unknown> => {
   switch (error._tag) {
     case "InvalidSchema":
     case "InvalidLens":
@@ -230,11 +239,11 @@ const detailsOf = (error: StoreError | BadRequest): Record<string, unknown> => {
 };
 
 /** Map every expected failure to a JSON error response. */
-export const respond = <E extends StoreError | BadRequest, R>(
+export const respond = <E extends HttpError, R>(
   effect: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
 ) =>
   effect.pipe(
-    Effect.catch((error: StoreError | BadRequest) =>
+    Effect.catch((error: HttpError) =>
       Effect.gen(function* () {
         if (error._tag === "StorageFailure") {
           // Log the operation name only; storage messages can echo data.
