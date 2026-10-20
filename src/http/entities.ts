@@ -5,14 +5,14 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { StoreError } from "../entity/model.ts";
-import { EntityId, Rev } from "../entity/model.ts";
-import { EntityStore } from "../entity/store.ts";
+import { EntityId, IndexName, Rev } from "../entity/model.ts";
+import { EntityStore, SYNC_BUILD_PAGES } from "../entity/store.ts";
 import { compileLens } from "../lens/apply.ts";
 import { BUILTINS } from "../lens/expr.ts";
 import { Direction, Lens } from "../lens/model.ts";
 import { checkDefinition, compile } from "../schema/compile.ts";
 import { EntitySchema, TypeName, Version } from "../schema/model.ts";
-import { BadRequest, body, intParam, json, respond, stringParam } from "./response.ts";
+import { BadRequest, body, intParam, json, rawParam, respond, stringParam } from "./response.ts";
 
 const Note = Schema.String.check(Schema.isMaxLength(2000));
 
@@ -51,6 +51,13 @@ const PatchBody = Schema.Struct({
   version: Version,
   patch: Schema.Record(Schema.String, Schema.Json),
   expectedRev: Schema.optionalKey(Rev),
+});
+
+const CreateIndexBody = Schema.Struct({
+  name: IndexName,
+  version: Version,
+  key: Schema.String.check(Schema.isMaxLength(4000)),
+  unique: Schema.optionalKey(Schema.Boolean),
 });
 
 const RunLensBody = Schema.Struct({ lens: Lens, direction: Direction, doc: Schema.Json });
@@ -160,11 +167,24 @@ export const entityRoutes = Layer.mergeAll(
     "/api/types/:type/entities",
     Effect.gen(function* () {
       const store = yield* EntityStore;
-      const page = yield* store.list(yield* pathParam("type"), {
+      const type = yield* pathParam("type");
+      const options = {
         version: yield* intParam("version"),
         cursor: yield* stringParam("cursor"),
         limit: yield* intParam("limit"),
-      });
+      };
+      const index = yield* stringParam("index");
+      const eq = yield* rawParam("eq");
+      if ((index === undefined) !== (eq === undefined)) {
+        return yield* new BadRequest({
+          status: 400,
+          message: "index and eq go together: ?index=<name>&eq=<key>",
+        });
+      }
+      const page =
+        index === undefined || eq === undefined
+          ? yield* store.list(type, options)
+          : yield* store.lookup(type, index, eq, options);
       return json(
         (yield* includeLinks())
           ? { ...page, included: yield* store.resolveLinks(page.items) }
@@ -250,6 +270,53 @@ export const entityRoutes = Layer.mergeAll(
           version: yield* intParam("version"),
           before: yield* intParam("before"),
           limit: yield* intParam("limit"),
+        }),
+      );
+    }),
+  ),
+
+  // ── Indexes ──
+  route(
+    "GET",
+    "/api/types/:type/indexes",
+    Effect.gen(function* () {
+      const store = yield* EntityStore;
+      return json({ items: yield* store.listIndexes(yield* pathParam("type")) });
+    }),
+  ),
+  route(
+    "POST",
+    "/api/types/:type/indexes",
+    Effect.gen(function* () {
+      const input = yield* body(CreateIndexBody);
+      const store = yield* EntityStore;
+      return json(yield* store.createIndex(yield* pathParam("type"), input), 201);
+    }),
+  ),
+  route(
+    "GET",
+    "/api/types/:type/indexes/:name",
+    Effect.gen(function* () {
+      const store = yield* EntityStore;
+      return json(yield* store.getIndex(yield* pathParam("type"), yield* pathParam("name")));
+    }),
+  ),
+  route(
+    "DELETE",
+    "/api/types/:type/indexes/:name",
+    Effect.gen(function* () {
+      const store = yield* EntityStore;
+      return json(yield* store.dropIndex(yield* pathParam("type"), yield* pathParam("name")));
+    }),
+  ),
+  route(
+    "POST",
+    "/api/types/:type/indexes/:name/build",
+    Effect.gen(function* () {
+      const store = yield* EntityStore;
+      return json(
+        yield* store.buildIndex(yield* pathParam("type"), yield* pathParam("name"), {
+          steps: SYNC_BUILD_PAGES,
         }),
       );
     }),

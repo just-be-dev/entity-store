@@ -2,7 +2,8 @@
 
 ## Storage layout (D1)
 
-Four tables, defined in `migrations/0001_entity_store.sql`:
+Four core tables, defined in `migrations/0001_entity_store.sql`. Links
+(`0002`) and secondary indexes (`0003`) add their own, described below.
 
 | Table              | Key                | Holds                                                                    |
 | ------------------ | ------------------ | ------------------------------------------------------------------------ |
@@ -21,8 +22,8 @@ Cost per operation, in D1 rows:
 | Operation               | Round trips      | Rows read             | Rows written                           |
 | ----------------------- | ---------------- | --------------------- | -------------------------------------- |
 | read entity             | 1                | 2 (entity + its type) | 0                                      |
-| create                  | 1 batch          | 1                     | 3 (entity, type index entry, revision) |
-| update / patch / delete | 1 read + 1 batch | 3                     | 2 (entity, revision)                   |
+| create                  | 1 batch          | 2                     | 3 (entity, type index entry, revision) |
+| update / patch / delete | 1 read + 1 batch | 4                     | 2 (entity, revision)                   |
 | history page            | 1                | n + 2                 | 0                                      |
 
 The batch is a D1 transaction. The revision row is copied from the entity row
@@ -33,7 +34,8 @@ don't touch the `(type, id)` index because neither column changes.
 
 Schema versions are immutable, so each Worker isolate caches compiled schemas
 and lenses after first use; steady-state reads cost no extra queries for
-schemas.
+schemas. Every write batch also reads its type's row once, through
+`index_guard` (see [Indexes](#indexes)).
 
 ## Links between entities
 
@@ -69,6 +71,80 @@ until they're rewritten at the new one.
 | ------------------------------- | --------------------------- |
 | write that doesn't change links | 0                           |
 | each link added or removed      | 2 (link row + target index) |
+
+## Indexes
+
+An index lets you look entities up by a key computed from their data, such as
+a person by email. It belongs to a type and is pinned to one schema version:
+
+```json
+{ "name": "email", "version": 1, "key": "lower(trim(email))", "unique": true }
+```
+
+- **Keys.** `key` is an [expression](#expression-language) evaluated against
+  the entity's data lensed to `version`. It must reference fields of that
+  version. A string is one key. `null` or a missing value means the entity
+  isn't in the index. An array of strings gives one key per distinct element
+  (non-unique indexes only, at most 64). Anything else is an error: use
+  `string(age)` to index a number. Keys are at most 1024 characters.
+  Lookups match keys exactly, so callers normalize the value they look up the
+  same way the key does (here, lowercase and trimmed).
+- **Pinned versions never go stale.** Versions and lenses are immutable, so an
+  entity's keys change only when the entity does. Entities stored or written
+  at later versions are lensed back to the pinned version. Adding schema
+  versions never re-indexes anything. If a later version reshapes the data
+  too much for an old index to be useful, create a new index at the newer
+  version and drop the old one.
+- **Writes.** Each write computes the entity's old and new keys and, in the
+  same batch as the entity, deletes the keys it lost and inserts the ones it
+  gained. Unchanged keys cost nothing. If a key can't be computed (the data
+  doesn't lens to the pinned version, or the expression fails or returns a
+  non-string), the write is refused with `422 IndexKeyFailed`.
+- **Unique indexes.** A write that would give a second entity the same key
+  fails with `409 UniqueViolation`, listing the index, key, and current
+  holder. A partial unique index on `index_entries` enforces this in the
+  database too, so two racing writers can't both claim a key. Deleting an
+  entity frees its keys.
+- **Creating an index.** The index starts `building`. Existing entities are
+  backfilled in steps of 500, each committing its entries and progress
+  together. The first 10 steps (5000 entities) run in the creating request.
+  The rest run on the API Worker's minutely cron, or on demand via
+  `POST /api/types/:type/indexes/:name/build`. Writers maintain a building
+  index from the moment it's defined. Lookups need `ready` and return
+  `409 IndexNotReady` until then.
+- **Failure.** If the backfill finds an entity whose key can't be computed, or
+  two entities with the same key in a unique index, the index becomes
+  `failed` with the reason in `error`, its entries are removed, and writers
+  stop maintaining it. Fix the data, then drop and recreate the index.
+- **Concurrency.** `entity_types.indexes_rev` counts changes to the set of
+  indexes writers maintain (create, fail, drop). Each isolate caches index
+  definitions per `indexes_rev`. Every entity write batch starts with an
+  insert into `index_guard` at the rev its definitions were read at, and a
+  trigger aborts the batch if the rev has moved. The write then retries with
+  fresh definitions, so no write can commit without maintaining an index that
+  exists. The backfill inserts an entry only while the entity is still at the
+  rev it read (and the index is still the same generation and building).
+  Writers write every key of a building index, not just changed ones, so an
+  entity the backfill skips is already covered.
+
+At most 16 indexes per type.
+
+| Table            | Key                              | Holds                                                  |
+| ---------------- | -------------------------------- | ------------------------------------------------------ |
+| `entity_indexes` | `(type, name)`                   | definition, `state`, backfill `cursor`, `generation`   |
+| `index_entries`  | `(type, name, value, entity_id)` | one row per key; unique indexes also hold the key once |
+| `index_guard`    | none (never holds rows)          | the write guard's trigger                              |
+
+| Operation                         | Extra cost                                         |
+| --------------------------------- | -------------------------------------------------- |
+| lookup (`?index=&eq=`)            | 2 queries; 2 rows read + 2 per match               |
+| write that doesn't change any key | 0 rows written                                     |
+| each key added or removed         | 1 row written (2 in a unique index)                |
+| write that gains a unique key     | 1 extra query (the readable conflict check)        |
+| creating an index                 | 1 row read and up to 2 written per existing entity |
+
+Writes also pay Worker CPU to lens data to each index's pinned version when
+it's stored at a different one.
 
 ## Schemas are data
 

@@ -94,6 +94,13 @@ export const intParam = (name: string) =>
     return value;
   });
 
+/** A query parameter as given, keeping `?name=` as the empty string. */
+export const rawParam = (name: string) =>
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    return searchParams(request.url).get(name) ?? undefined;
+  });
+
 export const stringParam = (name: string) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
@@ -109,12 +116,16 @@ const statusOf = (error: StoreError | BadRequest): number => {
     case "VersionNotFound":
     case "EntityNotFound":
     case "RevisionNotFound":
+    case "IndexNotFound":
       return 404;
     case "TypeAlreadyExists":
     case "EntityAlreadyExists":
     case "VersionConflict":
     case "RevConflict":
     case "EntityLinked":
+    case "IndexAlreadyExists":
+    case "IndexNotReady":
+    case "UniqueViolation":
       return 409;
     case "EntityDeleted":
       return 410;
@@ -124,6 +135,8 @@ const statusOf = (error: StoreError | BadRequest): number => {
     case "ValidationFailed":
     case "ProjectionFailed":
     case "LinkTargetInvalid":
+    case "InvalidIndex":
+    case "IndexKeyFailed":
       return 422;
     case "StorageFailure":
       return 500;
@@ -168,6 +181,24 @@ const messageOf = (error: StoreError | BadRequest): string => {
         : error.problems.map((p) => `${p.path}: ${p.message}`).join("; ");
     case "EntityLinked":
       return `Entity '${error.id}' is linked from other entities; remove those links first`;
+    case "InvalidIndex":
+      return "The index definition is invalid";
+    case "IndexAlreadyExists":
+      return `${error.type} already has an index named '${error.index}'`;
+    case "IndexNotFound":
+      return `${error.type} has no index named '${error.index}'`;
+    case "IndexNotReady":
+      return error.state === "failed"
+        ? `Index '${error.index}' failed to build; see the index for why, then drop and recreate it`
+        : `Index '${error.index}' is still building; try again shortly`;
+    case "IndexKeyFailed":
+      return `Couldn't compute index '${error.index}' for this ${error.type}: ${error.message}`;
+    case "UniqueViolation":
+      return error.conflicts.length === 0
+        ? "Another entity already has this unique index key"
+        : error.conflicts
+            .map((c) => `${c.index}: '${c.key}' is taken${c.id === undefined ? "" : ` by ${c.id}`}`)
+            .join("; ");
     case "StorageFailure":
       return "Storage error";
   }
@@ -177,7 +208,12 @@ const detailsOf = (error: StoreError | BadRequest): Record<string, unknown> => {
   switch (error._tag) {
     case "InvalidSchema":
     case "InvalidLens":
+    case "InvalidIndex":
       return { issues: error.issues };
+    case "IndexNotReady":
+      return { state: error.state };
+    case "UniqueViolation":
+      return { conflicts: error.conflicts };
     case "LensCheckFailed":
       return { report: error.report };
     case "RevConflict":

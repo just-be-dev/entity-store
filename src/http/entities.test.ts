@@ -269,6 +269,66 @@ describe("entity HTTP API", () => {
     }),
   );
 
+  it.effect("defines indexes and looks entities up by key", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      yield* call("POST", "/api/types/person/entities", {
+        id: "ada",
+        version: 1,
+        data: { name: "Ada", email: "Ada@example.com" },
+      });
+
+      const index = yield* call("POST", "/api/types/person/indexes", {
+        name: "email",
+        version: 1,
+        key: "lower(email)",
+        unique: true,
+      });
+      expect(index.status).toBe(201);
+      expect(index.body).toMatchObject({ name: "email", state: "ready", unique: true });
+      expect((yield* call("GET", "/api/types/person/indexes")).body.items).toHaveLength(1);
+      expect((yield* call("GET", "/api/types/person/indexes/email")).body.state).toBe("ready");
+
+      const found = yield* call(
+        "GET",
+        "/api/types/person/entities?index=email&eq=ada%40example.com",
+      );
+      expect(found.status).toBe(200);
+      expect(found.body.items.map((e: { id: string }) => e.id)).toEqual(["ada"]);
+      const none = yield* call("GET", "/api/types/person/entities?index=email&eq=");
+      expect(none.body.items).toEqual([]);
+
+      const taken = yield* call("POST", "/api/types/person/entities", {
+        version: 1,
+        data: { name: "Eve", email: "ADA@example.com" },
+      });
+      expect(taken.status).toBe(409);
+      expect(taken.body).toMatchObject({
+        code: "UniqueViolation",
+        conflicts: [{ index: "email", key: "ada@example.com", id: "ada" }],
+      });
+
+      const bad = yield* call("POST", "/api/types/person/indexes", {
+        name: "bad",
+        version: 1,
+        key: "lower(mail)",
+      });
+      expect(bad.status).toBe(422);
+      expect(bad.body).toMatchObject({ code: "InvalidIndex", issues: [{ path: "key" }] });
+      expect((yield* call("GET", "/api/types/person/entities?eq=x")).status).toBe(400);
+      const missing = yield* call("GET", "/api/types/person/entities?index=nope&eq=x");
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe("IndexNotFound");
+
+      expect((yield* call("POST", "/api/types/person/indexes/email/build")).body.state).toBe(
+        "ready",
+      );
+      expect((yield* call("DELETE", "/api/types/person/indexes/email")).status).toBe(200);
+      expect((yield* call("GET", "/api/types/person/indexes/email")).status).toBe(404);
+    }),
+  );
+
   it.effect("runs lenses and lists functions for authoring", () =>
     Effect.gen(function* () {
       const call = yield* makeClient;
