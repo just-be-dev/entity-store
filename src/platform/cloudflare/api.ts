@@ -8,7 +8,7 @@ import { apiRoutes } from "../../api.ts";
 import { Identity } from "../../auth/identity.ts";
 import { EntityStore, VersionCache } from "../../entity/store.ts";
 import { AppInfo } from "../../service.ts";
-import { AccessApp, AccessTeamDomain, DEV_IDENTITY, isDev } from "./access.ts";
+import { AccessApp, DEV_IDENTITY, deployer, isDev } from "./access.ts";
 import { d1SqlDatabase } from "./d1.ts";
 import { EntityDatabase } from "./database.ts";
 import type { AccessVerifier } from "./identity.ts";
@@ -46,7 +46,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
           return props;
         }
         const access = yield* AccessApp;
-        const teamDomain = yield* AccessTeamDomain;
+        const { teamDomain } = yield* deployer;
         return {
           ...props,
           access,

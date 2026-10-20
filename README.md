@@ -74,11 +74,11 @@ src/
 
 Set up a Cloudflare profile with `mise run cloudflare:profile`, or point `ALCHEMY_PROFILE` at an existing one. `mise run deploy` deploys the `prod` stage. The first deploy may offer to create Cloudflare-hosted Alchemy state.
 
-Deploying needs `ACCESS_EMAILS` and `ACCESS_TEAM_DOMAIN` (see below), and the Cloudflare account needs a Zero Trust organization for Access logins.
+The Cloudflare account needs a Zero Trust organization (a team domain) for Access logins. There's nothing else to configure. At plan time the stack reads two things from the Cloudflare API: the deploying user's email, which becomes the one person Access lets in, and the team domain. The deploy token needs **User Details: Read** for the first.
 
 Both Workers sit behind one Cloudflare Access application, covering custom routes, `workers.dev`, and version preview URLs:
 
-- People in `ACCESS_EMAILS` sign in through Access.
+- You (the Cloudflare user who deployed) sign in through Access, with your Cloudflare login email.
 - Automated clients send the `AgentToken` service token's headers: `CF-Access-Client-Id` (the stack's `agentTokenClientId` output) and `CF-Access-Client-Secret` (stored in Alchemy state).
 
 The API answers both on its own workers.dev URL and through the Website's service binding. It accepts a request only with a verified principal:
@@ -90,17 +90,15 @@ Everything except `/api/health` answers `401 Unauthenticated` without a principa
 
 ### Environment variables
 
-Only `ACCESS_EMAILS` and `ACCESS_TEAM_DOMAIN` are required, and only to deploy. Keep them in your shell or a gitignored `.env`; Alchemy loads `.env` automatically. With nothing else set, the stack is named `entity-store`, the app is served from `/`, and there are no custom routes.
+All of these are optional. With none set, the stack is named `entity-store`, the app is served from `/`, and there are no custom routes.
 
-| Variable             | Effect                                                                                                  |
-| -------------------- | ------------------------------------------------------------------------------------------------------- |
-| `ACCESS_EMAILS`      | Comma-separated emails Cloudflare Access lets in. Required to deploy; unused by `alchemy dev`.          |
-| `ACCESS_TEAM_DOMAIN` | The Zero Trust team domain, e.g. `team.cloudflareaccess.com`. The API verifies Access tokens it issued. |
-| `PROJECT_NAME`       | Names the Alchemy stack. Alchemy keys state and resource names by stack, so give each project its own.  |
-| `BASE_PATH`          | Serves the app under a path prefix such as `/<project>/`. It must start and end with `/`.               |
-| `STAGE`              | Set to `prod` to enable the route below.                                                                |
-| `PROJECT_HOST`       | Host for the prod route, such as `apps.example.com`.                                                    |
-| `PROJECT_ZONE`       | Cloudflare zone that owns that host, such as `example.com`.                                             |
+| Variable       | Effect                                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------------------ |
+| `PROJECT_NAME` | Names the Alchemy stack. Alchemy keys state and resource names by stack, so give each project its own. |
+| `BASE_PATH`    | Serves the app under a path prefix such as `/<project>/`. It must start and end with `/`.              |
+| `STAGE`        | Set to `prod` to enable the route below.                                                               |
+| `PROJECT_HOST` | Host for the prod route, such as `apps.example.com`.                                                   |
+| `PROJECT_ZONE` | Cloudflare zone that owns that host, such as `example.com`.                                            |
 
 When `STAGE=prod` and `PROJECT_NAME`, `PROJECT_HOST`, and `PROJECT_ZONE` are all set, the Website is routed at `<host>/<project>/*`, and the stack returns `https://<host>/<project>/` as its URL.
 
