@@ -8,7 +8,7 @@ A schema-versioned entity store on Cloudflare D1, built with Effect 4, Foldkit, 
 - **Lenses run at read time.** Data stays at the version it was written in and is lensed to whichever version a reader asks for. Old writers keep working: their edits are translated forward without clobbering fields they can't see.
 - **Checked lenses.** Before a version is saved, its lens is property-checked against random documents of both schemas and against stored data, with counterexamples shown in the UI.
 - **Links between entities.** A `link` field points at another entity of a given type. Writes check that targets exist, deletes are refused while something links to an entity, and reads can include linked entities or list backlinks.
-- **Secondary indexes.** An index is a key expression pinned to one schema version, such as `lower(email)` at v1, optionally unique. Lookups are one index seek. New schema versions never invalidate an index, because keys are computed at the pinned version.
+- **Secondary indexes.** An index is a key expression pinned to one schema version, such as `lower(email)` at v1, optionally unique. Lookups are one index seek. New schema versions never invalidate an index, because keys are computed at the pinned version. Indexes are defined on each type's Indexes page, and the type page can find entities by key.
 - **History on every write.** Each write appends a snapshot revision in the same D1 transaction, for 2 rows written per edit, with optimistic concurrency on `rev`.
 
 ```sh

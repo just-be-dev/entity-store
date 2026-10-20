@@ -10,7 +10,7 @@ import { modifyFields } from "foldkit/struct";
 import { Url, toString as urlToString } from "foldkit/url";
 import { buttonClass } from "@/components/ui/button";
 import { pageHeader } from "@/components/layout";
-import { EntityDetail, NewVersion, TypeDetail, TypeList } from "./page/index.ts";
+import { EntityDetail, NewVersion, TypeDetail, TypeIndexes, TypeList } from "./page/index.ts";
 import { AppRoute, href, urlToAppRoute } from "./route.ts";
 
 // MODEL
@@ -19,6 +19,7 @@ export const Page = defineTaggedUnion({
   TypeList: { model: TypeList.Model },
   TypeDetail: { model: TypeDetail.Model },
   NewVersion: { model: NewVersion.Model },
+  TypeIndexes: { model: TypeIndexes.Model },
   EntityDetail: { model: EntityDetail.Model },
   NotFound: { path: Schema.String },
 });
@@ -37,6 +38,7 @@ export const Message = defineMessageUnion({
   GotTypeListMessage: { message: TypeList.Message },
   GotTypeDetailMessage: { message: TypeDetail.Message },
   GotNewVersionMessage: { message: NewVersion.Message },
+  GotTypeIndexesMessage: { message: TypeIndexes.Message },
   GotEntityDetailMessage: { message: EntityDetail.Message },
 });
 export type Message = typeof Message.Type;
@@ -78,6 +80,11 @@ export const pageForRoute = (route: AppRoute): UpdateReturn =>
       Update.foldChildInit(NewVersion.init(name), {
         toParentModel: (model) => toModel(Page.NewVersion({ model })),
         toParentMessage: (message) => Message.GotNewVersionMessage({ message }),
+      }),
+    TypeIndexes: ({ name }) =>
+      Update.foldChildInit(TypeIndexes.init(name), {
+        toParentModel: (model) => toModel(Page.TypeIndexes({ model })),
+        toParentMessage: (message) => Message.GotTypeIndexesMessage({ message }),
       }),
     EntityDetail: ({ id }) =>
       Update.foldChildInit(EntityDetail.init(id), {
@@ -124,6 +131,17 @@ const foldNewVersion = Update.foldChild({
   toParentMessage: (message) => Message.GotNewVersionMessage({ message }),
 });
 
+const foldTypeIndexes = Update.foldChild({
+  update: TypeIndexes.update,
+  read: (model: Model) =>
+    Page.matchOrElse(model.page, { TypeIndexes: ({ model: page }) => Option.some(page) }, () =>
+      Option.none(),
+    ),
+  write: (model, nextTypeIndexes) =>
+    modifyFields(model, { page: () => Page.TypeIndexes({ model: nextTypeIndexes }) }),
+  toParentMessage: (message) => Message.GotTypeIndexesMessage({ message }),
+});
+
 const foldEntityDetail = Update.foldChild({
   update: EntityDetail.update,
   read: (model: Model) =>
@@ -151,6 +169,7 @@ export const update = (model: Model, message: Message) =>
     GotTypeListMessage: ({ message: pageMessage }) => foldTypeList(model, pageMessage),
     GotTypeDetailMessage: ({ message: pageMessage }) => foldTypeDetail(model, pageMessage),
     GotNewVersionMessage: ({ message: pageMessage }) => foldNewVersion(model, pageMessage),
+    GotTypeIndexesMessage: ({ message: pageMessage }) => foldTypeIndexes(model, pageMessage),
     GotEntityDetailMessage: ({ message: pageMessage }) => foldEntityDetail(model, pageMessage),
   });
 
@@ -161,6 +180,7 @@ const title = (page: Page): string =>
     TypeList: () => "Entity store",
     TypeDetail: ({ model }) => `${model.name} · Entity store`,
     NewVersion: ({ model }) => `New version of ${model.name} · Entity store`,
+    TypeIndexes: ({ model }) => `${model.name} indexes · Entity store`,
     EntityDetail: ({ model }) => `${model.id} · Entity store`,
     NotFound: () => "Not found · Entity store",
   });
@@ -199,6 +219,13 @@ const pageView = (page: Page, h: HtmlBuilder<Message>): Html =>
         model,
         view: NewVersion.view,
         toParentMessage: (message) => Message.GotNewVersionMessage({ message }),
+      }),
+    TypeIndexes: ({ model }) =>
+      h.submodel({
+        slotId: "type-indexes",
+        model,
+        view: TypeIndexes.view,
+        toParentMessage: (message) => Message.GotTypeIndexesMessage({ message }),
       }),
     EntityDetail: ({ model }) =>
       h.submodel({

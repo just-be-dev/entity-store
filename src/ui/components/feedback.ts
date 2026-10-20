@@ -3,7 +3,13 @@ import * as Option from "effect/Option";
 import type { Html, HtmlBuilder } from "foldkit/html";
 import { badge } from "@/components/ui/badge";
 import { entityLink } from "@/components/links";
-import type { ApiFailure, Backlink, Issue, LinkProblem } from "@/domain/entityStore";
+import type {
+  ApiFailure,
+  Backlink,
+  Issue,
+  LinkProblem,
+  UniqueConflict,
+} from "@/domain/entityStore";
 
 const alertClass =
   "rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive";
@@ -80,6 +86,33 @@ const linkedFromList = <M>(linkedFrom: ReadonlyArray<Backlink>, h: HtmlBuilder<M
       ),
   });
 
+const conflictList = <M>(conflicts: ReadonlyArray<UniqueConflict>, h: HtmlBuilder<M>): Html =>
+  Array.match(conflicts, {
+    onEmpty: () => h.empty,
+    onNonEmpty: (nonEmpty) =>
+      h.ul(
+        [h.Class("mt-2 space-y-1 text-xs"), h.AriaLabel("Taken keys")],
+        Array.map(nonEmpty, (conflict) =>
+          h.keyed("li")(
+            `${conflict.index}:${conflict.key}`,
+            [h.Class("flex flex-wrap items-center gap-x-2")],
+            [
+              h.code([h.Class("font-mono font-semibold")], [conflict.index]),
+              h.code([h.Class("font-mono")], [conflict.key]),
+              Option.match(conflict.id, {
+                onNone: () => h.span([], ["is taken"]),
+                onSome: (id) =>
+                  h.span(
+                    [h.Class("flex items-center gap-1")],
+                    ["is taken by", entityLink(id, h, { className: "text-destructive underline" })],
+                  ),
+              }),
+            ],
+          ),
+        ),
+      ),
+  });
+
 /** An API failure: its message, error code, and any located issues or link details. */
 export const failureAlert = <M>(failure: ApiFailure, h: HtmlBuilder<M>): Html =>
   h.div(
@@ -98,6 +131,7 @@ export const failureAlert = <M>(failure: ApiFailure, h: HtmlBuilder<M>): Html =>
       issueList(failure.issues, h),
       problemList(failure.problems, h),
       linkedFromList(failure.linkedFrom, h),
+      conflictList(failure.conflicts, h),
     ],
   );
 

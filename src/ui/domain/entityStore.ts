@@ -121,6 +121,37 @@ export type HistoryPage = typeof HistoryPage.Type;
 
 export const Deleted = Schema.Struct({ id: Schema.String, rev: Schema.Int });
 
+// ─── Indexes ────────────────────────────────────────────────────────────────
+
+export const IndexState = Schema.Literals(["building", "ready", "failed"]);
+export type IndexState = typeof IndexState.Type;
+
+/** A secondary index: a key expression evaluated at a pinned schema version. */
+export const IndexInfo = Schema.Struct({
+  type: Schema.String,
+  name: Schema.String,
+  version: Schema.Int,
+  key: Schema.String,
+  unique: Schema.Boolean,
+  state: IndexState,
+  error: Schema.OptionFromOptionalKey(Schema.String),
+  createdAt: Schema.Finite,
+  updatedAt: Schema.Finite,
+});
+export type IndexInfo = typeof IndexInfo.Type;
+
+export const IndexList = Schema.Struct({ items: Schema.Array(IndexInfo) });
+
+export const DroppedIndex = Schema.Struct({ type: Schema.String, name: Schema.String });
+
+/** A unique key a write tried to take, and who holds it (absent after a lost race). */
+export const UniqueConflict = Schema.Struct({
+  index: Schema.String,
+  key: Schema.String,
+  id: Schema.OptionFromOptionalKey(Schema.String),
+});
+export type UniqueConflict = typeof UniqueConflict.Type;
+
 // ─── Lens checks ────────────────────────────────────────────────────────────
 
 export const CheckFailure = Schema.Struct({
@@ -200,6 +231,7 @@ export const ApiFailure = Schema.Struct({
   currentRev: Schema.Option(Schema.Int),
   problems: Schema.Array(LinkProblem),
   linkedFrom: Schema.Array(Backlink),
+  conflicts: Schema.Array(UniqueConflict),
 });
 export type ApiFailure = typeof ApiFailure.Type;
 
@@ -212,4 +244,5 @@ export const ErrorBody = Schema.Struct({
   currentRev: Schema.OptionFromOptionalKey(Schema.Int),
   problems: Schema.optionalKey(Schema.Array(LinkProblem)),
   linkedFrom: Schema.optionalKey(Schema.Array(Backlink)),
+  conflicts: Schema.optionalKey(Schema.Array(UniqueConflict)),
 });

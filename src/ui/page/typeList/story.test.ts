@@ -25,6 +25,7 @@ const failure = (error: string, code: string) =>
     currentRev: Option.none(),
     problems: [],
     linkedFrom: [],
+    conflicts: [],
   });
 
 describe("type list", () => {

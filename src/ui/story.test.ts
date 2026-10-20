@@ -4,7 +4,7 @@ import { Command, given, message, model, story } from "foldkit/story";
 import type { Url } from "foldkit/url";
 import { apiFailure, personType } from "@/domain/entityStore.fixture";
 import { init, Message, NavigateInternal, Page, update } from "./main.ts";
-import { TypeDetail, TypeList } from "./page/index.ts";
+import { TypeDetail, TypeIndexes, TypeList } from "./page/index.ts";
 
 const url = (pathname: string): Url => ({
   protocol: "http:",
@@ -24,6 +24,13 @@ describe("root", () => {
     const entity = init(url("/entities/ada"));
     expect(entity.model.page._tag).toBe("EntityDetail");
     expect(entity.commands).toHaveLength(3);
+
+    const indexes = init(url("/types/person/indexes"));
+    expect(indexes.model.page._tag).toBe("TypeIndexes");
+    expect(indexes.commands?.map((c) => c.name)).toEqual([
+      TypeIndexes.FetchType.name,
+      TypeIndexes.FetchIndexes.name,
+    ]);
 
     expect(init(url("/nowhere")).model.page).toEqual(Page.NotFound({ path: "/nowhere" }));
   });
@@ -51,6 +58,10 @@ describe("root", () => {
       model((m) => {
         expect(m.page._tag === "TypeDetail" && m.page.model.entities._tag).toBe("Failed");
       }),
+      Command.resolve(
+        TypeDetail.FetchIndexes,
+        TypeDetail.Message.SucceededFetchIndexes({ items: [] }),
+      ),
     );
   });
 

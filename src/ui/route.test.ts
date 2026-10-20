@@ -18,6 +18,9 @@ describe("routes", () => {
     expect(urlToAppRoute(url("/types/person/versions/new"))).toEqual(
       AppRoute.NewVersion({ name: "person" }),
     );
+    expect(urlToAppRoute(url("/types/person/indexes"))).toEqual(
+      AppRoute.TypeIndexes({ name: "person" }),
+    );
     expect(urlToAppRoute(url("/entities/ada"))).toEqual(AppRoute.EntityDetail({ id: "ada" }));
     expect(urlToAppRoute(url("/nope/x"))._tag).toBe("NotFound");
   });
@@ -27,6 +30,7 @@ describe("routes", () => {
       AppRoute.TypeList(),
       AppRoute.TypeDetail({ name: "person" }),
       AppRoute.NewVersion({ name: "person" }),
+      AppRoute.TypeIndexes({ name: "person" }),
       AppRoute.EntityDetail({ id: "0190-abc" }),
     ];
     expect(routes.map((route) => urlToAppRoute(url(href(route))))).toEqual(routes);

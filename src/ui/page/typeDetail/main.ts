@@ -25,11 +25,14 @@ import {
   Entity,
   EntityPage,
   Included,
+  IndexInfo,
+  IndexList,
   ProjectionFailure,
   TypeInfo,
   type VersionInfo,
 } from "@/domain/entityStore";
 import { compactJson, exampleDocument, parseJson, prettyJson } from "@/domain/json";
+import { readyIndexes } from "@/domain/indexes";
 import { linkedTypes, type OutgoingLink, outgoingLinks } from "@/domain/links";
 import { entityLink, preview } from "@/components/links";
 import { formatTime, plural } from "@/lib/format";
@@ -75,11 +78,39 @@ export const Creation = defineTaggedUnion({
 });
 export type Creation = typeof Creation.Type;
 
+export const Indexes = defineTaggedUnion({
+  Loading: {},
+  Failed: { failure: ApiFailure },
+  Loaded: { items: Schema.Array(IndexInfo) },
+});
+export type Indexes = typeof Indexes.Type;
+
+/** A lookup by index key, shown instead of the full entity list while active. */
+export const Lookup = defineTaggedUnion({
+  Off: {},
+  Loading: { index: Schema.String, key: Schema.String, version: Schema.Int },
+  Failed: { index: Schema.String, key: Schema.String, version: Schema.Int, failure: ApiFailure },
+  Loaded: {
+    index: Schema.String,
+    key: Schema.String,
+    version: Schema.Int,
+    items: Schema.Array(Entity),
+    included: Included,
+    failures: Schema.Array(ProjectionFailure),
+    nextCursor: Schema.Option(Schema.String),
+  },
+});
+export type Lookup = typeof Lookup.Type;
+
 export const Model = Schema.Struct({
   name: Schema.String,
   type: TypeState,
   readVersion: Schema.Option(Schema.Int),
   entities: Entities,
+  indexes: Indexes,
+  lookupIndex: Schema.Option(Schema.String),
+  lookupKey: Schema.String,
+  lookup: Lookup,
   writeVersion: Schema.Option(Schema.Int),
   idText: Schema.String,
   dataText: Schema.String,
@@ -105,6 +136,24 @@ export const Message = defineMessageUnion({
   SubmittedNewEntity: {},
   SucceededCreateEntity: { entity: Entity },
   FailedCreateEntity: { failure: ApiFailure },
+  SucceededFetchIndexes: { items: Schema.Array(IndexInfo) },
+  FailedFetchIndexes: { failure: ApiFailure },
+  SelectedLookupIndex: { name: Schema.String },
+  UpdatedLookupKey: { value: Schema.String },
+  SubmittedLookup: {},
+  SucceededLookup: {
+    index: Schema.String,
+    key: Schema.String,
+    version: Schema.Int,
+    page: EntityPage,
+  },
+  FailedLookup: {
+    index: Schema.String,
+    key: Schema.String,
+    version: Schema.Int,
+    failure: ApiFailure,
+  },
+  ClickedClearLookup: {},
 });
 export type Message = typeof Message.Type;
 
@@ -150,6 +199,40 @@ export const FetchMoreEntities = Command.define("FetchMoreEntities", {
     ),
 });
 
+export const FetchIndexes = Command.define("FetchIndexes", {
+  args: { name: Schema.String },
+  messages: [Message.SucceededFetchIndexes, Message.FailedFetchIndexes],
+  execute: ({ name }) =>
+    getJson(apiUrl(`types/${segment(name)}/indexes`), IndexList).pipe(
+      Effect.map(({ items }) => Message.SucceededFetchIndexes({ items })),
+      Effect.catch((failure) => Effect.succeed(Message.FailedFetchIndexes({ failure }))),
+    ),
+});
+
+/** Lookups show up to one full page; a unique index has at most one match. */
+export const LOOKUP_LIMIT = 200;
+
+export const LookUpEntities = Command.define("LookUpEntities", {
+  args: { name: Schema.String, index: Schema.String, key: Schema.String, version: Schema.Int },
+  messages: [Message.SucceededLookup, Message.FailedLookup],
+  execute: ({ name, index, key, version }) =>
+    getJson(
+      apiUrl(`types/${segment(name)}/entities`, {
+        index,
+        eq: key,
+        version: `${version}`,
+        limit: `${LOOKUP_LIMIT}`,
+        include: "links",
+      }),
+      EntityPage,
+    ).pipe(
+      Effect.map((page) => Message.SucceededLookup({ index, key, version, page })),
+      Effect.catch((failure) =>
+        Effect.succeed(Message.FailedLookup({ index, key, version, failure })),
+      ),
+    ),
+});
+
 export const CreateEntity = Command.define("CreateEntity", {
   args: {
     name: Schema.String,
@@ -180,13 +263,17 @@ export const init = (name: string): Update.Return<Model, Message> => ({
     type: TypeState.Loading(),
     readVersion: Option.none(),
     entities: Entities.Idle(),
+    indexes: Indexes.Loading(),
+    lookupIndex: Option.none(),
+    lookupKey: "",
+    lookup: Lookup.Off(),
     writeVersion: Option.none(),
     idText: "",
     dataText: "{}",
     dataTemplate: "{}",
     creation: Creation.Idle(),
   }),
-  commands: [FetchType({ name })],
+  commands: [FetchType({ name }), FetchIndexes({ name })],
 });
 
 // UPDATE
@@ -228,6 +315,26 @@ const loadedAt = (model: Model, version: number): Option.Option<LoadedEntities> 
     Loaded: (loaded) => (loaded.version === version ? Option.some(loaded) : Option.none()),
   });
 
+/** The active lookup's index and key, if any. */
+const activeLookup = (lookup: Lookup): Option.Option<{ index: string; key: string }> =>
+  Lookup.match<Option.Option<{ index: string; key: string }>>(lookup, {
+    Off: () => Option.none(),
+    Loading: ({ index, key }) => Option.some({ index, key }),
+    Failed: ({ index, key }) => Option.some({ index, key }),
+    Loaded: ({ index, key }) => Option.some({ index, key }),
+  });
+
+const lookUp = (model: Model, index: string, key: string, version: number): UpdateReturn => ({
+  model: modifyFields(model, { lookup: () => Lookup.Loading({ index, key, version }) }),
+  commands: [LookUpEntities({ name: model.name, index, key, version })],
+});
+
+const isPendingLookup = (model: Model, index: string, key: string, version: number) =>
+  model.lookup._tag === "Loading" &&
+  model.lookup.index === index &&
+  model.lookup.key === key &&
+  model.lookup.version === version;
+
 const withMore = (entities: Entities, more: More): Entities =>
   entities._tag === "Loaded" ? Entities.Loaded({ ...entities, more }) : entities;
 
@@ -247,7 +354,19 @@ export const update = (model: Model, message: Message) =>
     FailedFetchType: ({ failure }) => ({
       model: modifyFields(model, { type: () => TypeState.Failed({ failure }) }),
     }),
-    SelectedReadVersion: ({ version }) => loadEntities(model, version),
+    SelectedReadVersion: ({ version }) => {
+      const reload = loadEntities(model, version);
+      return Option.match(activeLookup(model.lookup), {
+        onNone: () => reload,
+        onSome: ({ index, key }) => {
+          const relookup = lookUp(reload.model, index, key, version);
+          return {
+            model: relookup.model,
+            commands: [...(reload.commands ?? []), ...(relookup.commands ?? [])],
+          };
+        },
+      });
+    },
     SucceededFetchEntities: ({ version, page }) =>
       isCurrentVersion(model, version)
         ? {
@@ -368,6 +487,61 @@ export const update = (model: Model, message: Message) =>
     FailedCreateEntity: ({ failure }) => ({
       model: modifyFields(model, { creation: () => Creation.Failed({ failure }) }),
     }),
+    SucceededFetchIndexes: ({ items }) => {
+      const ready = readyIndexes(items);
+      return {
+        model: modifyFields(model, {
+          indexes: () => Indexes.Loaded({ items }),
+          lookupIndex: (selected) =>
+            Option.isSome(
+              Option.filter(selected, (name) => Array.some(ready, (i) => i.name === name)),
+            )
+              ? selected
+              : Option.map(Array.head(ready), (index) => index.name),
+        }),
+      };
+    },
+    FailedFetchIndexes: ({ failure }) => ({
+      model: modifyFields(model, { indexes: () => Indexes.Failed({ failure }) }),
+    }),
+    SelectedLookupIndex: ({ name }) => ({
+      model: modifyFields(model, { lookupIndex: () => Option.some(name) }),
+    }),
+    UpdatedLookupKey: ({ value }) => ({ model: modifyFields(model, { lookupKey: () => value }) }),
+    SubmittedLookup: () =>
+      Option.match(Option.all({ index: model.lookupIndex, version: model.readVersion }), {
+        onNone: () => ({ model }),
+        onSome: ({ index, version }) =>
+          String.isEmpty(model.lookupKey)
+            ? { model }
+            : lookUp(model, index, model.lookupKey, version),
+      }),
+    SucceededLookup: ({ index, key, version, page }) =>
+      isPendingLookup(model, index, key, version)
+        ? {
+            model: modifyFields(model, {
+              lookup: () =>
+                Lookup.Loaded({
+                  index,
+                  key,
+                  version,
+                  items: page.items,
+                  included: page.included ?? {},
+                  failures: page.failures,
+                  nextCursor: page.nextCursor,
+                }),
+            }),
+          }
+        : { model },
+    FailedLookup: ({ index, key, version, failure }) =>
+      isPendingLookup(model, index, key, version)
+        ? {
+            model: modifyFields(model, {
+              lookup: () => Lookup.Failed({ index, key, version, failure }),
+            }),
+          }
+        : { model },
+    ClickedClearLookup: () => ({ model: modifyFields(model, { lookup: () => Lookup.Off() }) }),
   });
 
 // VIEW
@@ -603,11 +777,19 @@ const moreView = (nextCursor: Option.Option<string>, more: More, h: HtmlBuilder<
       ),
   });
 
+type EmptyText = Readonly<{ title: string; description: string }>;
+
+const noEntities: EmptyText = {
+  title: "No entities",
+  description: "Create one with the form below.",
+};
+
 const entitiesTable = (
   items: ReadonlyArray<Entity>,
   schema: Option.Option<VersionInfo>,
   included: Included,
   h: HtmlBuilder<Message>,
+  empty: EmptyText = noEntities,
 ): Html =>
   Array.match(items, {
     onEmpty: () =>
@@ -616,10 +798,7 @@ const entitiesTable = (
         [
           Empty.header(
             {},
-            [
-              Empty.title({}, ["No entities"], h),
-              Empty.description({}, ["Create one with the form below."], h),
-            ],
+            [Empty.title({}, [empty.title], h), Empty.description({}, [empty.description], h)],
             h,
           ),
         ],
@@ -678,19 +857,190 @@ const entitiesView = (model: Model, info: TypeInfo, h: HtmlBuilder<Message>): Ht
       ],
     },
     [
-      Entities.match(model.entities, {
-        Idle: () => h.empty,
-        Loading: () => statusText("Loading entities…", h),
-        Failed: ({ failure }) => failureAlert(failure, h),
-        Loaded: ({ version, items, failures, nextCursor, more, included }) =>
-          h.div(
-            [h.Class("space-y-3")],
+      h.div(
+        [h.Class("space-y-3")],
+        [
+          lookupForm(model, h),
+          Lookup.match(model.lookup, {
+            Off: () => allEntitiesView(model, h),
+            Loading: ({ index, key }) => statusText(`Looking up ${index} = "${key}"…`, h),
+            Failed: ({ failure }) => failureAlert(failure, h),
+            Loaded: ({ index, key, version, items, included, failures, nextCursor }) =>
+              h.div(
+                [h.Class("space-y-3")],
+                [
+                  entitiesTable(items, versionInfo(model, version), included, h, {
+                    title: "No matches",
+                    description: `No entity has ${index} = "${key}". Keys match exactly.`,
+                  }),
+                  failuresView(failures, h),
+                  Option.isSome(nextCursor)
+                    ? statusText(`Showing the first ${LOOKUP_LIMIT} matches.`, h)
+                    : h.empty,
+                ],
+              ),
+          }),
+        ],
+      ),
+    ],
+    h,
+  );
+
+const allEntitiesView = (model: Model, h: HtmlBuilder<Message>): Html =>
+  Entities.match(model.entities, {
+    Idle: () => h.empty,
+    Loading: () => statusText("Loading entities…", h),
+    Failed: ({ failure }) => failureAlert(failure, h),
+    Loaded: ({ version, items, failures, nextCursor, more, included }) =>
+      h.div(
+        [h.Class("space-y-3")],
+        [
+          entitiesTable(items, versionInfo(model, version), included, h),
+          failuresView(failures, h),
+          moreView(nextCursor, more, h),
+        ],
+      ),
+  });
+
+const selectedIndex = (model: Model, ready: ReadonlyArray<IndexInfo>): Option.Option<IndexInfo> =>
+  Option.flatMap(model.lookupIndex, (name) => Array.findFirst(ready, (i) => i.name === name));
+
+/** Find entities by a ready index's key. Hidden until the type has one. */
+const lookupForm = (model: Model, h: HtmlBuilder<Message>): Html =>
+  Indexes.match(model.indexes, {
+    Loading: () => h.empty,
+    Failed: () => h.empty,
+    Loaded: ({ items }) =>
+      Array.match(readyIndexes(items), {
+        onEmpty: () => h.empty,
+        onNonEmpty: (ready) =>
+          h.form(
             [
-              entitiesTable(items, versionInfo(model, version), included, h),
-              failuresView(failures, h),
-              moreView(nextCursor, more, h),
+              h.OnSubmit(Message.SubmittedLookup()),
+              h.Class("space-y-1 rounded-lg border border-border bg-muted/30 p-3"),
+              h.AriaLabel("Find by index"),
+              h.Role("search"),
+            ],
+            [
+              h.div(
+                [h.Class("flex flex-wrap items-end gap-3")],
+                [
+                  selectField(
+                    {
+                      id: "lookup-index",
+                      label: "Find by",
+                      value: Option.getOrElse(model.lookupIndex, () => ""),
+                      options: Array.map(ready, (index) => ({
+                        value: index.name,
+                        label: index.name,
+                      })),
+                      onChange: (name) => Message.SelectedLookupIndex({ name }),
+                    },
+                    h,
+                  ),
+                  input(
+                    {
+                      id: "lookup-key",
+                      label: "Key",
+                      value: model.lookupKey,
+                      placeholder: "exact key",
+                      onInput: (value) => Message.UpdatedLookupKey({ value }),
+                      className: "font-mono",
+                      wrapperClass: "max-w-sm flex-1",
+                    },
+                    h,
+                  ),
+                  button(
+                    {
+                      type: "submit",
+                      size: "sm",
+                      isDisabled: String.isEmpty(model.lookupKey),
+                    },
+                    "Find",
+                    h,
+                  ),
+                  model.lookup._tag === "Off"
+                    ? h.empty
+                    : button(
+                        {
+                          type: "button",
+                          variant: "ghost",
+                          size: "sm",
+                          onClick: Message.ClickedClearLookup(),
+                        },
+                        "Show all",
+                        h,
+                      ),
+                ],
+              ),
+              Option.match(selectedIndex(model, ready), {
+                onNone: () => h.empty,
+                onSome: (index) =>
+                  h.p(
+                    [h.Class("text-xs text-muted-foreground")],
+                    [
+                      "Matches ",
+                      h.code([h.Class("font-mono")], [index.key]),
+                      ` at v${index.version} exactly${index.unique ? " (unique)" : ""}.`,
+                    ],
+                  ),
+              }),
             ],
           ),
+      }),
+  });
+
+const indexesSummary = (model: Model, info: TypeInfo, h: HtmlBuilder<Message>): Html =>
+  section(
+    {
+      title: "Indexes",
+      actions: [
+        h.a(
+          [
+            h.Href(href(AppRoute.TypeIndexes({ name: info.name }))),
+            h.Class(buttonClass({ variant: "outline", size: "sm" })),
+          ],
+          ["Manage indexes"],
+        ),
+      ],
+    },
+    [
+      Indexes.match(model.indexes, {
+        Loading: () => statusText("Loading indexes…", h),
+        Failed: ({ failure }) => failureAlert(failure, h),
+        Loaded: ({ items }) =>
+          Array.match(items, {
+            onEmpty: () =>
+              h.p(
+                [h.Class("text-sm text-muted-foreground")],
+                ["No indexes. Add one to look entities up by a field, like email."],
+              ),
+            onNonEmpty: (indexes) =>
+              h.ul(
+                [h.Class("flex flex-wrap gap-2"), h.AriaLabel("Index summary")],
+                Array.map(indexes, (index) =>
+                  h.keyed("li")(
+                    index.name,
+                    [
+                      h.Class(
+                        "flex items-center gap-2 rounded-lg border border-border px-2 py-1 text-xs",
+                      ),
+                    ],
+                    [
+                      h.span([h.Class("font-mono font-semibold")], [index.name]),
+                      h.code([h.Class("font-mono text-muted-foreground")], [index.key]),
+                      index.state === "ready"
+                        ? h.empty
+                        : badge(
+                            { variant: index.state === "failed" ? "destructive" : "outline" },
+                            [index.state],
+                            h,
+                          ),
+                    ],
+                  ),
+                ),
+              ),
+          }),
       }),
     ],
     h,
@@ -797,6 +1147,7 @@ const loadedView = (model: Model, info: TypeInfo, h: HtmlBuilder<Message>): Html
       ),
       entitiesView(model, info, h),
       newEntityView(model, info, h),
+      indexesSummary(model, info, h),
       versionsView(info, h),
     ],
   );
