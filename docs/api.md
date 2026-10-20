@@ -1,11 +1,12 @@
 # Entity store HTTP API
 
-All routes live under `/api`, take and return JSON, and return errors as
+All routes live under `/api` and need a verified principal (Cloudflare Access; see [Cloudflare](cloudflare.md#identity-and-authorization)) except `GET /api/health`. They take and return JSON, and return errors as
 `{ "error": string, "code": string, ...details }`. Request bodies are capped at 256 KB.
 
 | Status | `code`                                                                               |
 | ------ | ------------------------------------------------------------------------------------ |
 | 400    | `BadRequest` (malformed JSON, body doesn't match the route's shape, bad query param) |
+| 401    | `Unauthenticated` (no verified principal; every route except `/api/health`)          |
 | 404    | `TypeNotFound`, `VersionNotFound`, `EntityNotFound`, `RevisionNotFound`,             |
 |        | `IndexNotFound`                                                                      |
 | 409    | `TypeAlreadyExists`, `EntityAlreadyExists`, `VersionConflict`, `RevConflict`,        |

@@ -50,8 +50,8 @@ An entity store on Cloudflare D1 where schemas and the lenses between schema ver
 - Use Alchemy v2's Effect API. `node_modules/alchemy/src` is the final reference; docs start at https://alchemy.run/llms.txt.
 - A Worker or Durable Object's outer Effect runs at plan time and cold start: declare and acquire bindings there. Storage, raw bindings, callbacks, and identity are usable only in the returned instance or request handler.
 - Never load `cloudflare:*` at module top level on a path imported at plan time.
-- The Website edge only forwards requests. The API Worker is public on its workers.dev URL and also reached through the Website's service binding; both paths hit the same routes.
-- Both Workers are public. Add identity and authorization, covering both entry points, before exposing protected operations.
+- The Website edge only forwards requests, adding the Access-verified principal and `EDGE_SECRET`. The API Worker is reachable on its workers.dev URL and through the Website's service binding; both paths hit the same routes.
+- Both Workers sit behind one Cloudflare Access application (`access.ts`). Keep both enrolled. The API trusts only `ctx.access` or an edge-forwarded principal with a matching `EDGE_SECRET`; never trust identity headers otherwise. New routes go through `route()` in `src/http/entities.ts` so they require a principal.
 - Keep Workers Observability logs and traces on both Workers, and keep `Cloudflare.Telemetry` on Effect-native hosts so `Effect.withSpan` and `Effect.fn` spans reach Cloudflare. Compatibility dates must be `2026-07-28` or later. Tune sampling for volume, and never attach secrets or payloads to telemetry.
 - Callbacks are delivered at least once. Make side effects and scheduled jobs idempotent, and test crash and retry behavior.
 - Use checkout-local Alchemy state in dev and Cloudflare-hosted state for deployed stages. Never commit local state or credentials.

@@ -12,6 +12,7 @@ import { BUILTINS } from "../lens/expr.ts";
 import { Direction, Lens } from "../lens/model.ts";
 import { checkDefinition, compile } from "../schema/compile.ts";
 import { EntitySchema, TypeName, Version } from "../schema/model.ts";
+import { requirePrincipal } from "./auth.ts";
 import { BadRequest, body, intParam, json, rawParam, respond, stringParam } from "./response.ts";
 
 const Note = Schema.String.check(Schema.isMaxLength(2000));
@@ -86,11 +87,16 @@ const includeLinks = () =>
     return true;
   });
 
+/**
+ * Every entity-store route requires a verified principal. Any principal may
+ * use every operation: Cloudflare Access is the allowlist (see
+ * docs/cloudflare.md), so there's no finer-grained authorization yet.
+ */
 const route = <E extends StoreError | BadRequest, R>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: `/api/${string}`,
   handler: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
-) => HttpRouter.add(method, path, respond(handler));
+) => HttpRouter.add(method, path, respond(Effect.andThen(requirePrincipal, handler)));
 
 export const entityRoutes = Layer.mergeAll(
   // ── Types and schema versions ──

@@ -66,8 +66,7 @@ src/
 
 ## Not done yet
 
-- **No authentication.** Both Workers are public. Anyone who can reach the URL can create types, versions, and entities. Add identity and authorization covering both entry points before deploying anywhere shared.
-- No filtering beyond listing by type. Querying by field across versions needs a design (fields can be renamed between versions); `json_extract` expression indexes per version are the likely route.
+- **All-or-nothing access.** Everyone Cloudflare Access lets in can do everything. There are no per-type or read-only permissions.
 - Deletes are soft (tombstone plus a `delete` revision). There's no restore or purge yet.
 - Links only restrict deletes; there's no cascade or "unlink on delete" option yet.
 
@@ -75,19 +74,32 @@ src/
 
 Set up a Cloudflare profile with `mise run cloudflare:profile`, or point `ALCHEMY_PROFILE` at an existing one. `mise run deploy` deploys the `prod` stage. The first deploy may offer to create Cloudflare-hosted Alchemy state.
 
-Both Workers are public. The API answers on its workers.dev URL and through the Website's service binding, so any authentication you add has to cover both.
+Deploying needs `ACCESS_EMAILS` (see below), and the Cloudflare account needs a Zero Trust organization (a team domain) for Access logins.
+
+Both Workers sit behind one Cloudflare Access application, covering custom routes, `workers.dev`, and version preview URLs:
+
+- People in `ACCESS_EMAILS` sign in through Access.
+- Automated clients send the `AgentToken` service token's headers: `CF-Access-Client-Id` (the stack's `agentTokenClientId` output) and `CF-Access-Client-Secret` (stored in Alchemy state).
+
+The API answers both on its own workers.dev URL and through the Website's service binding. It accepts a request only with a verified principal:
+
+- **Direct requests:** `ctx.access`, which only Access sets.
+- **Through the Website:** the principal the edge forwards along with a shared secret. The edge strips any client-supplied copy of those headers.
+
+Everything except `/api/health` answers `401 Unauthenticated` without a principal. Local dev creates no Access resources; the API acts as `dev@localhost`.
 
 ### Environment variables
 
-All of these are optional. With none set, the stack is named `entity-store`, the app is served from `/`, and there are no custom routes.
+Only `ACCESS_EMAILS` is required, and only to deploy. Keep it in your shell or a gitignored `.env`; Alchemy loads `.env` automatically. With nothing else set, the stack is named `entity-store`, the app is served from `/`, and there are no custom routes.
 
-| Variable       | Effect                                                                                                 |
-| -------------- | ------------------------------------------------------------------------------------------------------ |
-| `PROJECT_NAME` | Names the Alchemy stack. Alchemy keys state and resource names by stack, so give each project its own. |
-| `BASE_PATH`    | Serves the app under a path prefix such as `/<project>/`. It must start and end with `/`.              |
-| `STAGE`        | Set to `prod` to enable the route below.                                                               |
-| `PROJECT_HOST` | Host for the prod route, such as `apps.example.com`.                                                   |
-| `PROJECT_ZONE` | Cloudflare zone that owns that host, such as `example.com`.                                            |
+| Variable        | Effect                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------ |
+| `ACCESS_EMAILS` | Comma-separated emails Cloudflare Access lets in. Required to deploy; unused by `alchemy dev`.         |
+| `PROJECT_NAME`  | Names the Alchemy stack. Alchemy keys state and resource names by stack, so give each project its own. |
+| `BASE_PATH`     | Serves the app under a path prefix such as `/<project>/`. It must start and end with `/`.              |
+| `STAGE`         | Set to `prod` to enable the route below.                                                               |
+| `PROJECT_HOST`  | Host for the prod route, such as `apps.example.com`.                                                   |
+| `PROJECT_ZONE`  | Cloudflare zone that owns that host, such as `example.com`.                                            |
 
 When `STAGE=prod` and `PROJECT_NAME`, `PROJECT_HOST`, and `PROJECT_ZONE` are all set, the Website is routed at `<host>/<project>/*`, and the stack returns `https://<host>/<project>/` as its URL.
 

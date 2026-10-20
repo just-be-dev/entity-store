@@ -19,7 +19,7 @@ edge.ts ── service binding ── Api Worker ◀── direct client (worker
 
 The Website is a `Cloudflare.Website.Foldkit` with `env: { API: Api, BASE_PATH }` and `assets.runWorkerFirst: ["<base>api/*"]`, where the base path is `/` unless the app is deployed under a project path. The API is a `Cloudflare.Worker` that keeps Alchemy's default `workersDev: true`, which gives it a stable workers.dev URL and per-version preview URLs. `edge.ts` gets its env type from `Cloudflare.InferEnv<typeof App>` and only forwards requests to the binding, stripping the base path first. Routing and business logic live in the API.
 
-Both Workers are public. When the product needs protected operations, enforce authentication and authorization in the API, since requests can arrive directly or through the Website.
+Both Workers are behind Cloudflare Access when deployed (`access.ts`). The API checks identity on every request, since requests can arrive directly or through the Website.
 
 Both Workers use compatibility date `2026-10-04`. When you move it, test the new date rather than relying on Cloudflare's default.
 
@@ -64,9 +64,24 @@ To deploy, add a Cloudflare profile with `mise run cloudflare:profile` or select
 
 ## Identity and authorization
 
-When the product needs protected data, pick an authentication scheme. Don't assume forwarded requests carry a verified identity.
+Cloudflare Access authenticates. One shared Access application (`src/platform/cloudflare/access.ts`) gates both Workers on every entry point, with two policies:
 
-Turn verified identity into a platform-independent, request-scoped service and check authorization inside application operations. Treat a missing identity as unauthenticated. Knowing who someone is and deciding what they can do are separate jobs.
+- an `allow` policy for `ACCESS_EMAILS`;
+- a `non_identity` policy for the `AgentToken` service token.
+
+The API turns each request's verified principal into the request-scoped `Identity` service (`src/auth/identity.ts`):
+
+- **Direct requests:** `Cloudflare.Access.Context`, which only Access populates.
+- **Through the Website's service binding:** there's no `ctx.access`. The edge forwards the principal it got from Access (`x-entity-store-principal`) together with `EDGE_SECRET` (`x-entity-store-edge`), a random value Alchemy generates and binds to both Workers. The API accepts a forwarded principal only when the secret matches (compared in constant time). The edge deletes both headers from incoming requests first.
+- **Anything else is unauthenticated.**
+
+Every route except `/api/health` requires a principal (`src/http/auth.ts`) and answers `401` without one.
+
+Authorization is all-or-nothing for now: Access is the allowlist. When roles or per-type permissions arrive, check them inside the application operations, using `Identity`.
+
+Under `alchemy dev` no Access resources are created. The API's `dev.access` stub makes every request act as `dev@localhost`.
+
+Rotate the agent token by bumping `clientSecretVersion` on `AgentToken`, then redeploying. Rotate the edge secret by replacing the `EdgeSecret` resource.
 
 `public/_headers` sets the CSP for static assets. Set security headers for API responses in the API itself. Keep the deployed CSP strict even if the dev server needs something looser.
 

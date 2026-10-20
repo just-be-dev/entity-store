@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { AccessApp, AgentToken, EdgeSecret, isDev } from "./access.ts";
 import Api from "./api.ts";
 
 /** A path prefix with leading and trailing slashes, like `/` or `/my-app/`. */
@@ -54,7 +55,9 @@ const { stackName, basePath, prodRoute } = Effect.runSync(DeployConfig);
 
 export const App = Cloudflare.Website.Foldkit("App", {
   main: "src/platform/cloudflare/edge.ts",
-  env: { API: Api, BASE_PATH: basePath },
+  env: { API: Api, BASE_PATH: basePath, EDGE_SECRET: EdgeSecret },
+  // Behind Cloudflare Access when deployed (see access.ts); open in local dev.
+  ...(isDev ? {} : { access: AccessApp }),
   // Static assets are matched against the full path, so API calls are
   // `<base>api/*` (`/api/*` unless deployed under a project path).
   assets: { runWorkerFirst: [`${basePath}api/*`] },
@@ -83,6 +86,12 @@ export default Alchemy.Stack(
   Effect.gen(function* () {
     yield* Api;
     const app = yield* App;
-    return { url: Option.match(prodRoute, { onNone: () => app.url, onSome: ({ url }) => url }) };
+    const url = Option.match(prodRoute, { onNone: () => app.url, onSome: ({ url }) => url });
+    if (isDev) {
+      return { url };
+    }
+    // The secret stays in state; read it with `alchemy state read`.
+    const token = yield* AgentToken;
+    return { url, agentTokenClientId: token.clientId };
   }),
 );
