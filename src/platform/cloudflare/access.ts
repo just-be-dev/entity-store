@@ -1,6 +1,7 @@
+import * as user from "@distilled.cloud/cloudflare/user";
+import * as zeroTrust from "@distilled.cloud/cloudflare/zero-trust";
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
-import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 
 /**
@@ -8,25 +9,50 @@ import * as Effect from "effect/Effect";
  * entry point (custom routes, `workers.dev`, version preview URLs) needs a
  * login. Two ways in:
  *
- * - people listed in `ACCESS_EMAILS` (comma-separated), via Access login;
+ * - the Cloudflare user who deploys the stack, via Access login with the
+ *   same email as their Cloudflare login;
  * - the `AgentToken` service token (`CF-Access-Client-Id` /
- *   `CF-Access-Client-Secret` headers), for automated testing.
+ *   `CF-Access-Client-Secret` headers), for automated testing. Its secret
+ *   lives only in Alchemy state.
  *
- * The API checks identity itself as well (see identity.ts). Local dev
- * (`alchemy dev`) creates no Access resources; the API simulates a signed-in
- * dev user instead.
+ * Nothing is configured by hand: the email and the Zero Trust team domain are
+ * looked up from the Cloudflare API at plan time. The API checks identity
+ * itself as well (see identity.ts). Local dev (`alchemy dev`) creates no
+ * Access resources; the API simulates a signed-in dev user instead.
  */
 
 /** True under `alchemy dev`. Read when the stack module loads, like DeployConfig. */
 export const isDev = Effect.runSync(Alchemy.ALCHEMY_DEV);
 
-/** Who may sign in. Required to deploy; read at plan time. */
-export const AccessEmails = Config.String("ACCESS_EMAILS").pipe(
-  Config.map((value) =>
-    value
-      .split(",")
-      .map((email) => email.trim())
-      .filter((email) => email.length > 0),
+/**
+ * Plan time only: the deploying user's email and the account's Zero Trust
+ * team domain (the issuer of the Access tokens the API verifies). Fails the
+ * plan with a readable reason if either is unavailable.
+ */
+export const deployer = Effect.gen(function* () {
+  const { accountId } = yield* yield* Cloudflare.CloudflareEnvironment;
+  const me = yield* user.getUser({});
+  const org = yield* zeroTrust.listOrganizationsForAccount({ accountId });
+  if (!me.email) {
+    return yield* Effect.die(
+      new Error("Couldn't read your Cloudflare email; the deploy token needs User Details: Read"),
+    );
+  }
+  if (!org.authDomain) {
+    return yield* Effect.die(
+      new Error("This Cloudflare account has no Zero Trust organization; set up a team domain"),
+    );
+  }
+  return { email: me.email, teamDomain: org.authDomain };
+}).pipe(
+  Effect.catchTag("OrganizationNotFound", () =>
+    Effect.die(
+      new Error("This Cloudflare account has no Zero Trust organization; set up a team domain"),
+    ),
+  ),
+  // A failed lookup can only abort the plan; say what was being looked up.
+  Effect.catch((error) =>
+    Effect.die(new Error("Couldn't look up the deploying Cloudflare user", { cause: error })),
   ),
 );
 
@@ -37,19 +63,13 @@ export const AgentToken = Cloudflare.Access.ServiceToken("AgentToken", { duratio
 export const AccessApp = Cloudflare.Access.Application(
   "Access",
   Effect.gen(function* () {
-    const emails: ReadonlyArray<string> = yield* AccessEmails.pipe(
-      Effect.filterOrFail(
-        (list) => list.length > 0,
-        () => new Error("ACCESS_EMAILS is empty"),
-      ),
-      Effect.orDie,
-    );
+    const { email } = yield* deployer;
     const token = yield* AgentToken;
     return {
       type: "self_hosted" as const,
       sessionDuration: "24h",
       policies: [
-        { name: "People", decision: "allow" as const, include: emails.map((email) => ({ email })) },
+        { name: "Owner", decision: "allow" as const, include: [{ email }] },
         {
           name: "Agent token",
           decision: "non_identity" as const,
@@ -59,12 +79,6 @@ export const AccessApp = Cloudflare.Access.Application(
     };
   }),
 );
-
-/**
- * The Zero Trust team domain, e.g. `team.cloudflareaccess.com`: the issuer of
- * Access tokens the API verifies. Required to deploy; read at plan time.
- */
-export const AccessTeamDomain = Config.String("ACCESS_TEAM_DOMAIN");
 
 /** The identity `alchemy dev` simulates for the API, since there's no Access locally. */
 export const DEV_IDENTITY = { email: "dev@localhost" };

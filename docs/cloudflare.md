@@ -66,7 +66,7 @@ To deploy, add a Cloudflare profile with `mise run cloudflare:profile` or select
 
 Cloudflare Access authenticates. One shared Access application (`src/platform/cloudflare/access.ts`) gates both Workers on every entry point, with two policies:
 
-- an `allow` policy for `ACCESS_EMAILS`;
+- an `allow` policy for the deploying Cloudflare user's email, looked up from the Cloudflare API at plan time;
 - a `non_identity` policy for the `AgentToken` service token.
 
 The API turns each request's verified principal into the request-scoped `Identity` service (`src/auth/identity.ts`):
@@ -74,7 +74,7 @@ The API turns each request's verified principal into the request-scoped `Identit
 - **Direct requests:** `Cloudflare.Access.Context`, which only Access populates.
 - **Through the Website's service binding:** there's no `ctx.access`, and the Website's own script doesn't get one either, because the static assets router sits in front of it. The edge forwards every header unchanged, including the `Cf-Access-Jwt-Assertion` token Access adds to every request it admits. The API verifies that token with `jose`:
   - RS256 against the team's published keys, cached per isolate;
-  - issuer pinned to `https://<ACCESS_TEAM_DOMAIN>`;
+  - issuer pinned to the account's team domain (looked up at plan time and bound as `ACCESS_TEAM_DOMAIN`);
   - audience pinned to the Access application's AUD, bound as `ACCESS_AUD`;
   - expiry enforced.
 - **Anything else is unauthenticated.**
