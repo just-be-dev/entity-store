@@ -74,11 +74,11 @@ src/
 
 Set up a Cloudflare profile with `mise run cloudflare:profile`, or point `ALCHEMY_PROFILE` at an existing one. `mise run deploy` deploys the `prod` stage. The first deploy may offer to create Cloudflare-hosted Alchemy state.
 
-The Cloudflare account needs a Zero Trust organization (a team domain) for Access logins. There's nothing else to configure. At plan time the stack reads two things from the Cloudflare API: the deploying user's email, which becomes the one person Access lets in, and the team domain. The deploy token needs **User Details: Read** for the first.
+The Cloudflare account needs a Zero Trust organization (a team domain) for Access logins. There's nothing else to configure. At plan time the stack reads the team domain from the Cloudflare API. It never asks who is deploying, so an account-owned deploy token works.
 
 Both Workers sit behind one Cloudflare Access application, covering custom routes, `workers.dev`, and version preview URLs:
 
-- You (the Cloudflare user who deployed) sign in through Access, with your Cloudflare login email.
+- Members of the Cloudflare account sign in through Access, with their Cloudflare login email.
 - Automated clients send the `AgentToken` service token's headers: `CF-Access-Client-Id` (the stack's `agentTokenClientId` output) and `CF-Access-Client-Secret` (stored in Alchemy state).
 
 The API answers both on its own workers.dev URL and through the Website's service binding. It accepts a request only with a verified principal:

@@ -66,7 +66,7 @@ To deploy, add a Cloudflare profile with `mise run cloudflare:profile` or select
 
 Cloudflare Access authenticates. One shared Access application (`src/platform/cloudflare/access.ts`) gates both Workers on every entry point, with two policies:
 
-- an `allow` policy for the deploying Cloudflare user's email, looked up from the Cloudflare API at plan time;
+- an `allow` policy for members of the Cloudflare account (`cloudflareAccountMember`), which Access checks itself;
 - a `non_identity` policy for the `AgentToken` service token.
 
 The API turns each request's verified principal into the request-scoped `Identity` service (`src/auth/identity.ts`):
