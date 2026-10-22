@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { AccessApp, AgentToken, isDev } from "./access.ts";
 import Api from "./api.ts";
+import { hubBindings, hubPaths } from "./hub.ts";
 import { ChangesQueue } from "./queue.ts";
 
 /** An optional variable; blank counts as unset. */
@@ -44,10 +45,10 @@ const { prodRoute } = Effect.runSync(DeployConfig);
 
 export const App = Cloudflare.Website.Foldkit("App", {
   main: "src/platform/cloudflare/edge.ts",
-  env: { API: Api },
+  env: { API: Api, ...hubBindings(isDev) },
   // Behind Cloudflare Access when deployed (see access.ts); open in local dev.
   ...(isDev ? {} : { access: AccessApp }),
-  assets: { runWorkerFirst: ["/api/*"] },
+  assets: { runWorkerFirst: ["/api/*", ...hubPaths] },
   ...Option.match(prodRoute, { onNone: () => ({}), onSome: ({ routes }) => ({ routes }) }),
   compatibility: { date: "2026-10-04" },
   observability: {

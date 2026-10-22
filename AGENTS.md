@@ -24,6 +24,13 @@ An entity store on Cloudflare D1 where schemas and the lenses between schema ver
 - Lens expressions run in the API Worker on reads: keep the language pure, deterministic, prototype-safe, and bounded (`STEP_BUDGET`). Don't add I/O, clocks, randomness, or `eval`.
 - Changing the meaning of an existing lens op or expression function changes how stored data reads. Add new ops/functions instead.
 
+## The hub shell
+
+This app carries the platform's hub shell: the app rail and the assistant drawer, served by the agents project (`docs/hub-shell.md` there). `src/platform/cloudflare/hub.ts` binds agents' prod `Api` and `Embed` Workers on deployed stages and forwards `/_hub/*` to them from the App Worker, `index.html` loads `/_hub/shell.js` with `data-app="entities"`, and the CSP allows `frame-src 'self'`. agents also binds this app's `Api` to give the assistant read-only entity tools; keep the RPC's read methods compatible.
+
+- The App Worker forwards `/_hub/api/*` with the email Access admitted, and agents trusts it. Keep `/_hub/*` behind Access.
+- Deploy agents first when the shell's protocol changes; this app only forwards.
+
 ## Ownership and scope
 
 - Keep small apps flat under `src/`. As responsibilities emerge, group business code by domain under `src/<domain>/`, keeping models, validation, operations, and capability contracts together.
