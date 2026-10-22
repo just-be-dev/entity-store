@@ -7,6 +7,7 @@ import {
   TYPE_NAME_PATTERN,
   TypeName,
   Version,
+  isDotsOnly,
 } from "../schema/model.ts";
 
 // ─── IDs ────────────────────────────────────────────────────────────────────
@@ -15,6 +16,7 @@ export const EntityId = Schema.String.check(
   Schema.isPattern(new RegExp(ENTITY_ID_PATTERN), {
     message: "Entity ids use letters, digits, '_', '-', '.' or '@' (max 128)",
   }),
+  Schema.makeFilter((id: string) => !isDotsOnly(id) || "Entity ids can't be only dots"),
 ).pipe(Schema.brand("EntityId"));
 export type EntityId = typeof EntityId.Type;
 

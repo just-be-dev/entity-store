@@ -113,10 +113,10 @@ describe("schema definitions", () => {
 
   it("link fields accept ids with dots and @, within the id pattern", () => {
     const { validate } = compiled({ fields: { to: { type: "link", to: "person" } } });
-    for (const id of ["ada@example.com", "a.b_c-d", "x".repeat(128)]) {
+    for (const id of ["ada@example.com", "a.b_c-d", "x".repeat(128), ".a", "a..", "@"]) {
       expect(Result.isSuccess(validate({ to: id }))).toBe(true);
     }
-    for (const id of ["", "has space", "a/b", "a:b", "x".repeat(129), "é"]) {
+    for (const id of ["", "has space", "a/b", "a:b", "x".repeat(129), "é", ".", "..", "..."]) {
       expect(Result.isFailure(validate({ to: id }))).toBe(true);
     }
   });

@@ -42,8 +42,8 @@ schemas. Every write batch also reads its type's row once, through
 
 ## Entity ids and titles
 
-Entity ids match `^[A-Za-z0-9_.@-]{1,128}$`, so an email address can be an
-id. Ids are global across types, and `link` fields hold them.
+Entity ids match `^[A-Za-z0-9_.@-]{1,128}$` and aren't only dots, so an
+email address can be an id. Ids are global across types, and `link` fields hold them.
 
 A schema's root may name a `title`: a top-level field of type `string` or
 `nullable` of `string` that is the entity's display name. The UI shows it

@@ -2,7 +2,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as SchemaAST from "effect/SchemaAST";
 import type { EntitySchema, FieldType } from "./model.ts";
-import { ENTITY_ID_PATTERN, TYPE_NAME_PATTERN, isFieldName } from "./model.ts";
+import { ENTITY_ID_PATTERN, TYPE_NAME_PATTERN, isDotsOnly, isFieldName } from "./model.ts";
 import { compileRegex } from "./regex.ts";
 
 /** A problem with a schema definition, located by a dotted path. */
@@ -281,6 +281,9 @@ const compileType = (type: FieldType, mode: Mode): DynamicSchema => {
     case "link":
       return withChecks(Schema.String, [
         patternCheck(ENTITY_ID_PATTERN, mode, `Expected the id of a ${type.to}`),
+        Schema.makeFilter(
+          (id: string) => !isDotsOnly(id) || `Expected the id of a ${type.to}, not only dots`,
+        ),
       ]);
   }
 };

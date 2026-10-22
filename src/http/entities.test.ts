@@ -430,6 +430,13 @@ describe("entity HTTP API", () => {
       ]);
       expect((yield* call("GET", "/api/changes?after=-1")).status).toBe(400);
 
+      // `.` and `..` can't be addressed in a path, so they aren't ids.
+      const dots = yield* call("POST", "/api/types/person/entities", {
+        id: "...",
+        data: { name: "A", email: "a@b.co" },
+      });
+      expect(dots.status).toBe(400);
+
       const tooBig = yield* call("PUT", path, {
         patch: { name: "x" },
         meta: { pad: "x".repeat(1100) },

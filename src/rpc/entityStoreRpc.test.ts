@@ -131,6 +131,8 @@ describe("EntityStoreRpc", () => {
           rpc.createEntity("person", { data: { name: "A" }, meta: { pad: "x".repeat(2000) } }),
           rpc.createEntity("person", { data: { name: "A" }, version: 0 }),
           rpc.upsertEntity("person", "has space", { patch: {} }),
+          rpc.upsertEntity("person", "..", { patch: { name: "A" } }),
+          rpc.createEntity("person", { id: ".", data: { name: "A" } }),
           rpc.upsertEntity("person", "ok", { patch: [] }),
           rpc.getEntity(42),
           rpc.getChange("ada", 0),

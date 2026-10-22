@@ -99,8 +99,8 @@ type Revision = {
   working after a new one ships: their edits are carried forward without
   clobbering fields they can't see. Responses always carry the `version` used.
 - Entity ids match `^[A-Za-z0-9_.@-]{1,128}$`, so `ada@example.com` works.
-  Percent-encode them in paths (`/api/entities/ada%40example.com`). The ids
-  `.` and `..` match the pattern but can't be addressed in a URL path.
+  Percent-encode them in paths (`/api/entities/ada%40example.com`). Ids made
+  only of dots (`.`, `..`) are refused, since URL paths can't address them.
 - `meta` is an optional JSON object of at most 1 KB on any write. It's stored
   with the write's change and returned in [change events](#change-events) and
   `getChange`. The store doesn't interpret it.

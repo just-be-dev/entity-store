@@ -151,8 +151,15 @@ export const isFieldName = (name: string) =>
 
 export const TYPE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
-/** Entity ids: what link fields hold. `.` and `@` allow ids like `ada@example.com`. */
+/**
+ * Entity ids: what link fields hold. `.` and `@` allow ids like
+ * `ada@example.com`. An id must also have something besides dots
+ * ({@link isDotsOnly}): `.` and `..` can't be addressed in a URL path.
+ */
 export const ENTITY_ID_PATTERN = "^[A-Za-z0-9_.@-]{1,128}$";
+
+/** True for ids like `.` and `..`, which match the pattern but aren't allowed. */
+export const isDotsOnly = (id: string): boolean => /^\.+$/.test(id);
 
 /** Entity type names: lowercase-ish slugs that are safe in URLs. */
 export const TypeName = Schema.String.check(
