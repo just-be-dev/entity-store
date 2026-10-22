@@ -7,7 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { apiRoutes } from "../../api.ts";
 import { Identity } from "../../auth/identity.ts";
-import { ChangeDelivery } from "../../entity/changes.ts";
+import { ChangeDelivery, singleFlight } from "../../entity/changes.ts";
 import { EntityStore, VersionCache } from "../../entity/store.ts";
 import type { RpcResult } from "../../rpc/entityStoreRpc.ts";
 import { RPC_PRINCIPAL, RPC_WRITES, entityStoreRpc } from "../../rpc/entityStoreRpc.ts";
@@ -110,7 +110,10 @@ export default class Api extends Cloudflare.Worker<Api>()(
           ),
         ),
       );
-    const afterWrite = execution.waitUntil(flushChanges(WRITE_FLUSH_BATCHES));
+    // One write-triggered flush at a time per isolate; writes during it make
+    // it run once more instead of each resending the same unsent changes.
+    const writeFlush = singleFlight(flushChanges(WRITE_FLUSH_BATCHES));
+    const afterWrite = execution.waitUntil(writeFlush);
     const env = yield* Cloudflare.Workers.WorkerEnvironment;
     // The env is only populated at runtime; build the verifier (and its key
     // cache) on first use and keep it for the isolate.

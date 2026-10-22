@@ -75,6 +75,42 @@ export class ChangeQueue extends Context.Service<
 /** Events per send: a Queue `sendBatch` takes at most 100 messages. */
 export const FLUSH_BATCH = 100;
 
+/**
+ * Runs `run` at most once at a time per instance (an isolate). A trigger
+ * while it runs doesn't start another run. It marks the current one dirty,
+ * so it runs once more when it finishes, picking up whatever the triggers
+ * wrote. N concurrent writes then cause two flushes, not N flushes that each
+ * resend the same unsent window. A failed run stops the loop; the next
+ * trigger (or the cron) starts again.
+ */
+export const singleFlight = <E, R>(
+  run: Effect.Effect<unknown, E, R>,
+): Effect.Effect<void, E, R> => {
+  let running = false;
+  let dirty = false;
+  const loop: Effect.Effect<void, E, R> = Effect.suspend(() => {
+    dirty = false;
+    return Effect.andThen(
+      run,
+      Effect.suspend(() => (dirty ? loop : Effect.void)),
+    );
+  });
+  return Effect.suspend(() => {
+    if (running) {
+      dirty = true;
+      return Effect.void;
+    }
+    running = true;
+    return loop.pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          running = false;
+        }),
+      ),
+    );
+  });
+};
+
 /** The cursor the queue flusher advances. */
 const CURSOR = "queue";
 

@@ -1,12 +1,20 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type { Lens } from "../lens/model.ts";
 import type { EntitySchema } from "../schema/model.ts";
 import { makeSqlite } from "../testing/sqlite.ts";
-import { ChangeDelivery, ChangeQueue, ChangeQueueError, FLUSH_BATCH } from "./changes.ts";
+import {
+  ChangeDelivery,
+  ChangeQueue,
+  ChangeQueueError,
+  FLUSH_BATCH,
+  singleFlight,
+} from "./changes.ts";
 import type { ChangeEvent } from "./model.ts";
 import { ChangeMeta } from "./model.ts";
 import { EntityStore, VersionCache } from "./store.ts";
@@ -303,5 +311,57 @@ describe("change delivery", () => {
       expect(result).toEqual({ sent: 3, after: 0 });
       expect(cursor(sqlite)).toBe(3);
     }).pipe(Effect.provide(layer));
+  });
+
+  describe("single-flight flushes", () => {
+    it.effect("triggers during a run cause one more run, not one each", () =>
+      Effect.gen(function* () {
+        let runs = 0;
+        let gate = yield* Deferred.make<void>();
+        const flush = singleFlight(
+          Effect.suspend(() => {
+            runs++;
+            return Deferred.await(gate);
+          }),
+        );
+        const first = yield* Effect.forkChild(flush);
+        yield* Effect.yieldNow;
+        expect(runs).toBe(1);
+        // Three writes land while the first flush is sending.
+        for (let i = 0; i < 3; i++) {
+          yield* flush;
+        }
+        expect(runs).toBe(1);
+        const released = gate;
+        gate = yield* Deferred.make<void>();
+        yield* Deferred.succeed(released, undefined);
+        yield* Effect.yieldNow;
+        expect(runs).toBe(2);
+        yield* Deferred.succeed(gate, undefined);
+        yield* Fiber.join(first);
+        expect(runs).toBe(2);
+        // Idle again: the next trigger runs right away.
+        const ready = yield* Deferred.make<void>();
+        yield* Deferred.succeed(ready, undefined);
+        gate = ready;
+        yield* flush;
+        expect(runs).toBe(3);
+      }),
+    );
+
+    it.effect("a failed run lets the next trigger start again", () =>
+      Effect.gen(function* () {
+        let runs = 0;
+        const flush = singleFlight(
+          Effect.suspend(() => {
+            runs++;
+            return runs === 1 ? Effect.fail("queue down") : Effect.void;
+          }),
+        );
+        expect(yield* Effect.flip(flush)).toBe("queue down");
+        yield* flush;
+        expect(runs).toBe(2);
+      }),
+    );
   });
 });
