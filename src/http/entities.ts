@@ -5,13 +5,23 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { StoreError } from "../entity/model.ts";
-import { ChangeMeta, EntityId, IndexName, Rev } from "../entity/model.ts";
+import {
+  AddVersionBody,
+  CheckVersionBody,
+  CreateEntityBody,
+  CreateTypeBody,
+  DeleteBody,
+  PatchBody,
+  ReplaceBody,
+  UpsertBody,
+} from "../entity/inputs.ts";
+import { EntityId, IndexName } from "../entity/model.ts";
 import { EntityStore, SYNC_BUILD_PAGES } from "../entity/store.ts";
 import { compileLens } from "../lens/apply.ts";
 import { BUILTINS } from "../lens/expr.ts";
 import { Direction, Lens } from "../lens/model.ts";
 import { checkDefinition, compile } from "../schema/compile.ts";
-import { EntitySchema, TypeName, Version } from "../schema/model.ts";
+import { EntitySchema, Version } from "../schema/model.ts";
 import { requirePrincipal } from "./auth.ts";
 import {
   BadRequest,
@@ -23,63 +33,6 @@ import {
   respond,
   stringParam,
 } from "./response.ts";
-
-const Note = Schema.String.check(Schema.isMaxLength(2000));
-
-const CreateTypeBody = Schema.Struct({
-  name: TypeName,
-  description: Schema.optionalKey(Note),
-  schema: EntitySchema,
-});
-
-const CheckVersionBody = Schema.Struct({
-  schema: EntitySchema,
-  lens: Lens,
-  samples: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 500 }))),
-});
-
-const AddVersionBody = Schema.Struct({
-  schema: EntitySchema,
-  lens: Lens,
-  note: Schema.optionalKey(Note),
-  force: Schema.optionalKey(Schema.Boolean),
-});
-
-// Writes name the version they speak, or omit it to write at the latest.
-const CreateEntityBody = Schema.Struct({
-  id: Schema.optionalKey(EntityId),
-  version: Schema.optionalKey(Version),
-  data: Schema.Json,
-  meta: Schema.optionalKey(ChangeMeta),
-});
-
-const ReplaceBody = Schema.Struct({
-  version: Schema.optionalKey(Version),
-  data: Schema.Json,
-  expectedRev: Schema.optionalKey(Rev),
-  meta: Schema.optionalKey(ChangeMeta),
-});
-
-const PatchBody = Schema.Struct({
-  version: Schema.optionalKey(Version),
-  patch: Schema.Record(Schema.String, Schema.Json),
-  expectedRev: Schema.optionalKey(Rev),
-  meta: Schema.optionalKey(ChangeMeta),
-});
-
-/** `expectedRev: 0` means the entity must not exist (or must be deleted). */
-const UpsertBody = Schema.Struct({
-  version: Schema.optionalKey(Version),
-  patch: Schema.Record(Schema.String, Schema.Json),
-  expectedRev: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  meta: Schema.optionalKey(ChangeMeta),
-});
-
-/** A delete's optional body; `?expectedRev` works too. */
-const DeleteBody = Schema.Struct({
-  expectedRev: Schema.optionalKey(Rev),
-  meta: Schema.optionalKey(ChangeMeta),
-});
 
 const CreateIndexBody = Schema.Struct({
   name: IndexName,
@@ -248,7 +201,14 @@ export const entityRoutes = Layer.mergeAll(
     Effect.gen(function* () {
       const input = yield* body(UpsertBody);
       const store = yield* EntityStore;
-      const upserted = yield* store.upsert(yield* pathParam("type"), yield* pathParam("id"), input);
+      const id = yield* pathParam("id");
+      if (!Schema.is(EntityId)(id)) {
+        return yield* new BadRequest({
+          status: 400,
+          message: "Entity ids use letters, digits, '_', '-', '.' or '@' (max 128)",
+        });
+      }
+      const upserted = yield* store.upsert(yield* pathParam("type"), id, input);
       return json(upserted, upserted.created ? 201 : 200);
     }),
   ),

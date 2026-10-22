@@ -13,6 +13,8 @@ export const Principal = Schema.Union([
   Schema.TaggedStruct("User", { email: Schema.String }),
   /** A machine client using an Access service token (e.g. an agent). */
   Schema.TaggedStruct("ServiceToken", { name: Schema.String }),
+  /** Another Worker calling over a service binding; holding the binding is the authorization. */
+  Schema.TaggedStruct("ServiceBinding", { name: Schema.String }),
 ]);
 export type Principal = typeof Principal.Type;
 
@@ -27,5 +29,13 @@ export class Identity extends Context.Service<
 }
 
 /** A short label for logs and audit fields. */
-export const describePrincipal = (principal: Principal): string =>
-  principal._tag === "User" ? principal.email : `service:${principal.name}`;
+export const describePrincipal = (principal: Principal): string => {
+  switch (principal._tag) {
+    case "User":
+      return principal.email;
+    case "ServiceToken":
+      return `service:${principal.name}`;
+    case "ServiceBinding":
+      return `binding:${principal.name}`;
+  }
+};
