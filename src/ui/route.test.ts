@@ -32,6 +32,7 @@ describe("routes", () => {
       AppRoute.NewVersion({ name: "person" }),
       AppRoute.TypeIndexes({ name: "person" }),
       AppRoute.EntityDetail({ id: "0190-abc" }),
+      AppRoute.EntityDetail({ id: "ada.lovelace@example.com" }),
     ];
     expect(routes.map((route) => urlToAppRoute(url(href(route))))).toEqual(routes);
   });

@@ -163,6 +163,22 @@ export const checkDefinition = (schema: EntitySchema): ReadonlyArray<DefinitionI
   };
 
   checkFields(schema.fields, "", 0, 1);
+  if (schema.title !== undefined) {
+    const field = Object.hasOwn(schema.fields, schema.title)
+      ? schema.fields[schema.title]
+      : undefined;
+    if (field === undefined) {
+      issues.push({ path: "title", message: `'${schema.title}' isn't a top-level field` });
+    } else if (
+      field.type !== "string" &&
+      !(field.type === "nullable" && field.of.type === "string")
+    ) {
+      issues.push({
+        path: "title",
+        message: `The title field must be a string or a nullable string, not ${field.type}`,
+      });
+    }
+  }
   if (fieldCount > MAX_FIELDS) {
     issues.push({ path: "", message: `Schemas may define at most ${MAX_FIELDS} fields` });
   }

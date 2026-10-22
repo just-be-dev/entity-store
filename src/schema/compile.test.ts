@@ -89,4 +89,35 @@ describe("schema definitions", () => {
     });
     expect(issues.map((i) => i.path)).toEqual(["s", "m[]"]);
   });
+
+  it("accepts a title naming a top-level string or nullable string field, and nothing else", () => {
+    const fields: EntitySchema["fields"] = {
+      name: { type: "string" },
+      nick: { type: "nullable", of: { type: "string" } },
+      age: { type: "number" },
+      tags: { type: "nullable", of: { type: "array", items: { type: "string" } } },
+      address: { type: "object", fields: { city: { type: "string" } } },
+    };
+    const check = (title: string) => checkDefinition({ title, fields }).map((i) => i.path);
+    expect(check("name")).toEqual([]);
+    expect(check("nick")).toEqual([]);
+    expect(check("age")).toEqual(["title"]);
+    expect(check("tags")).toEqual(["title"]);
+    expect(check("missing")).toEqual(["title"]);
+    expect(check("address.city")).toEqual(["title"]);
+    // Not an own field, even though every object has one.
+    expect(check("constructor")).toEqual(["title"]);
+    // A title doesn't change what data is valid.
+    expect(Result.isSuccess(compiled({ title: "name", fields }).validate({}))).toBe(false);
+  });
+
+  it("link fields accept ids with dots and @, within the id pattern", () => {
+    const { validate } = compiled({ fields: { to: { type: "link", to: "person" } } });
+    for (const id of ["ada@example.com", "a.b_c-d", "x".repeat(128)]) {
+      expect(Result.isSuccess(validate({ to: id }))).toBe(true);
+    }
+    for (const id of ["", "has space", "a/b", "a:b", "x".repeat(129), "é"]) {
+      expect(Result.isFailure(validate({ to: id }))).toBe(true);
+    }
+  });
 });

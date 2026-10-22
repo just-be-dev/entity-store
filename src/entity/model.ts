@@ -13,7 +13,7 @@ import {
 
 export const EntityId = Schema.String.check(
   Schema.isPattern(new RegExp(ENTITY_ID_PATTERN), {
-    message: "Entity ids use letters, digits, '_' or '-' (max 128)",
+    message: "Entity ids use letters, digits, '_', '-', '.' or '@' (max 128)",
   }),
 ).pipe(Schema.brand("EntityId"));
 export type EntityId = typeof EntityId.Type;

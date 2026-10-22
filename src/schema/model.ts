@@ -124,9 +124,13 @@ export const FieldType: Schema.Codec<FieldType> = Schema.Union([
   Schema.Struct({ type: Schema.Literal("link"), to: Schema.String, ...common }),
 ]);
 
-/** The root of every entity schema is an object. */
+/**
+ * The root of every entity schema is an object. `title` names the top-level
+ * string field that is an entity's display name.
+ */
 export const EntitySchema = Schema.Struct({
   description: Schema.optionalKey(Schema.String),
+  title: Schema.optionalKey(Schema.String),
   fields: Schema.Record(Schema.String, FieldType),
 });
 export type EntitySchema = typeof EntitySchema.Type;
@@ -147,8 +151,8 @@ export const isFieldName = (name: string) =>
 
 export const TYPE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
-/** Entity ids: what link fields hold. */
-export const ENTITY_ID_PATTERN = "^[A-Za-z0-9_-]{1,128}$";
+/** Entity ids: what link fields hold. `.` and `@` allow ids like `ada@example.com`. */
+export const ENTITY_ID_PATTERN = "^[A-Za-z0-9_.@-]{1,128}$";
 
 /** Entity type names: lowercase-ish slugs that are safe in URLs. */
 export const TypeName = Schema.String.check(
