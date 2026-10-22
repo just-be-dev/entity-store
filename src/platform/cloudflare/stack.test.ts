@@ -1,7 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import { DeployConfig } from "./stack.ts";
 
@@ -10,55 +9,37 @@ const read = (env: Record<string, string>) => DeployConfig.parse(ConfigProvider.
 const platform = {
   PROJECT_NAME: "cafe",
   BASE_PATH: "/cafe/",
-  PROJECT_HOST: "apps.example.com",
+  PROJECT_HOST: "cafe.example.com",
   PROJECT_ZONE: "example.com",
 };
 
-it.effect("defaults to the starter stack at / with no route", () =>
+it.effect("has no route with nothing set", () =>
   Effect.gen(function* () {
     const settings = yield* read({});
-    expect(settings.stackName).toBe("entity-store");
-    expect(settings.basePath).toBe("/");
     expect(Option.isNone(settings.prodRoute)).toBe(true);
   }),
 );
 
-it.effect("treats blank variables as unset", () =>
-  Effect.gen(function* () {
-    const settings = yield* read({ PROJECT_NAME: "  ", STAGE: "" });
-    expect(settings.stackName).toBe("entity-store");
-  }),
-);
-
-it.effect("routes prod under the project path", () =>
+it.effect("routes prod at the root of the project host, ignoring BASE_PATH", () =>
   Effect.gen(function* () {
     const settings = yield* read({ ...platform, STAGE: "prod" });
-    expect(settings.stackName).toBe("cafe");
-    expect(settings.basePath).toBe("/cafe/");
     expect(settings.prodRoute).toEqual(
       Option.some({
-        routes: [{ pattern: "apps.example.com/cafe/*", zoneName: "example.com" }],
-        url: "https://apps.example.com/cafe/",
+        routes: [{ pattern: "cafe.example.com/*", zoneName: "example.com" }],
+        url: "https://cafe.example.com/",
       }),
     );
   }),
 );
 
-it.effect("skips the route for previews and when the host or zone is missing", () =>
+it.effect("skips the route for previews and when the host or zone is missing or blank", () =>
   Effect.gen(function* () {
     const preview = yield* read({ ...platform, STAGE: "b-feature-1a2b" });
     expect(Option.isNone(preview.prodRoute)).toBe(true);
     const { PROJECT_ZONE: _, ...noZone } = platform;
     const missing = yield* read({ ...noZone, STAGE: "prod" });
     expect(Option.isNone(missing.prodRoute)).toBe(true);
-  }),
-);
-
-it.effect("rejects a base path without leading and trailing slashes", () =>
-  Effect.gen(function* () {
-    for (const BASE_PATH of ["cafe/", "/cafe"]) {
-      const exit = yield* Effect.exit(read({ BASE_PATH }));
-      expect(Exit.isFailure(exit)).toBe(true);
-    }
+    const blank = yield* read({ ...platform, PROJECT_HOST: "  ", STAGE: "prod" });
+    expect(Option.isNone(blank.prodRoute)).toBe(true);
   }),
 );

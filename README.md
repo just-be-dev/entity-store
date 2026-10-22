@@ -90,19 +90,15 @@ Everything except `/api/health` answers `401 Unauthenticated` without a principa
 
 ### Environment variables
 
-All of these are optional. With none set, the stack is named `entity-store`, the app is served from `/`, and there are no custom routes.
+All of these are optional. With none set, there are no custom routes. The app is always served from `/`, and the stack is always named `entity-store`, since its name keys Alchemy state.
 
-| Variable       | Effect                                                                                                 |
-| -------------- | ------------------------------------------------------------------------------------------------------ |
-| `PROJECT_NAME` | Names the Alchemy stack. Alchemy keys state and resource names by stack, so give each project its own. |
-| `BASE_PATH`    | Serves the app under a path prefix such as `/<project>/`. It must start and end with `/`.              |
-| `STAGE`        | Set to `prod` to enable the route below.                                                               |
-| `PROJECT_HOST` | Host for the prod route, such as `apps.example.com`.                                                   |
-| `PROJECT_ZONE` | Cloudflare zone that owns that host, such as `example.com`.                                            |
+| Variable       | Effect                                                       |
+| -------------- | ------------------------------------------------------------ |
+| `STAGE`        | Set to `prod` to enable the route below.                     |
+| `PROJECT_HOST` | Host for the prod route, such as `entity-store.example.com`. |
+| `PROJECT_ZONE` | Cloudflare zone that owns that host, such as `example.com`.  |
 
-When `STAGE=prod` and `PROJECT_NAME`, `PROJECT_HOST`, and `PROJECT_ZONE` are all set, the Website is routed at `<host>/<project>/*`, and the stack returns `https://<host>/<project>/` as its URL.
-
-Under a base path, UI code must build URLs from `import.meta.env.BASE_URL`, not absolute `/` paths.
+When `STAGE=prod` and `PROJECT_HOST` and `PROJECT_ZONE` are both set, the Website is routed at `<host>/*`, and the stack returns `https://<host>/` as its URL. The projects runner also sets `PROJECT_NAME` and `BASE_PATH`; the stack ignores them.
 
 ## Telemetry
 

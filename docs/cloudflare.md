@@ -9,7 +9,7 @@ Browser / client
           │
           ▼
 Website (Cloudflare.Website.Foldkit) ── static assets
-          │ <base>api/*, runWorkerFirst
+          │ /api/*, runWorkerFirst
           ▼
 edge.ts ── service binding ── Api Worker ◀── direct client (workers.dev)
                                    │
@@ -17,7 +17,7 @@ edge.ts ── service binding ── Api Worker ◀── direct client (worker
                                    └── D1 / Durable Objects / AI, when added
 ```
 
-The Website is a `Cloudflare.Website.Foldkit` with `env: { API: Api, BASE_PATH }` and `assets.runWorkerFirst: ["<base>api/*"]`, where the base path is `/` unless the app is deployed under a project path. The API is a `Cloudflare.Worker` that keeps Alchemy's default `workersDev: true`, which gives it a stable workers.dev URL and per-version preview URLs. `edge.ts` gets its env type from `Cloudflare.InferEnv<typeof App>` and only forwards requests to the binding, stripping the base path first. Routing and business logic live in the API.
+The Website is a `Cloudflare.Website.Foldkit` with `env: { API: Api }` and `assets.runWorkerFirst: ["/api/*"]`. The API is a `Cloudflare.Worker` that keeps Alchemy's default `workersDev: true`, which gives it a stable workers.dev URL and per-version preview URLs. `edge.ts` gets its env type from `Cloudflare.InferEnv<typeof App>` and only forwards requests to the binding. Routing and business logic live in the API.
 
 Both Workers are behind Cloudflare Access when deployed (`access.ts`). The API checks identity on every request, since requests can arrive directly or through the Website.
 
@@ -58,9 +58,7 @@ To deploy, add a Cloudflare profile with `mise run cloudflare:profile` or select
 
 ## Deploy settings
 
-`stack.ts` reads optional environment variables at plan time with Effect `Config`. The [README](../README.md#environment-variables) lists them.
-
-`BASE_PATH` sets Vite's `base` and the `runWorkerFirst` pattern, and `edge.ts` strips it before forwarding, so `/<project>/api/health` reaches the API as `/api/health`.
+`stack.ts` reads optional environment variables at plan time with Effect `Config`. The [README](../README.md#environment-variables) lists them. The app is always served from `/`: the stack ignores the runner's `BASE_PATH`, because each project gets its own host.
 
 ## Identity and authorization
 

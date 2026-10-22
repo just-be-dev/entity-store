@@ -4,14 +4,8 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 import { AccessApp, AgentToken, isDev } from "./access.ts";
 import Api from "./api.ts";
-
-/** A path prefix with leading and trailing slashes, like `/` or `/my-app/`. */
-const BasePath = Schema.String.check(
-  Schema.isPattern(/^\/(?:.*\/)?$/, { message: "BASE_PATH must start and end with /" }),
-);
 
 /** An optional variable; blank counts as unset. */
 const optional = (name: string) =>
@@ -21,46 +15,38 @@ const optional = (name: string) =>
   );
 
 /**
- * Optional deploy settings, read at plan time. With none set, the stack is
- * `entity-store`, served from `/`, with no custom routes.
+ * Optional deploy settings, read at plan time. With none set, there are no
+ * custom routes. With STAGE=prod, PROJECT_HOST and PROJECT_ZONE set, the app
+ * is routed at the root of `<host>` on the zone.
  *
- * - PROJECT_NAME  names the stack, so each project keeps its own Alchemy state.
- * - BASE_PATH     serves the app under a path prefix, e.g. `/<project>/`.
- * - STAGE, PROJECT_HOST, PROJECT_ZONE  with STAGE=prod and PROJECT_NAME set,
- *                 route `<host>/<project>/*` on the zone.
+ * The projects runner also sets PROJECT_NAME and BASE_PATH. The stack ignores
+ * them: each project has its own host, and the stack name keys Alchemy state,
+ * so it stays fixed.
  */
 export const DeployConfig = Config.all({
-  project: optional("PROJECT_NAME"),
-  basePath: Config.schema(BasePath, "BASE_PATH").pipe(Config.withDefault("/")),
   stage: optional("STAGE"),
   host: optional("PROJECT_HOST"),
   zone: optional("PROJECT_ZONE"),
 }).pipe(
-  Config.map(({ project, basePath, stage, host, zone }) => ({
-    stackName: Option.getOrElse(project, () => "entity-store"),
-    basePath,
-    prodRoute: Option.all({ project, host, zone }).pipe(
+  Config.map(({ stage, host, zone }) => ({
+    prodRoute: Option.all({ host, zone }).pipe(
       Option.filter(() => Option.contains(stage, "prod")),
-      Option.map(({ project, host, zone }) => ({
-        routes: [{ pattern: `${host}/${project}/*`, zoneName: zone }],
-        url: `https://${host}/${project}/`,
+      Option.map(({ host, zone }) => ({
+        routes: [{ pattern: `${host}/*`, zoneName: zone }],
+        url: `https://${host}/`,
       })),
     ),
   })),
 );
 
-// Alchemy.Stack takes its name as a plain string, so the deploy settings are
-// read once, when the stack module loads.
-const { stackName, basePath, prodRoute } = Effect.runSync(DeployConfig);
+const { prodRoute } = Effect.runSync(DeployConfig);
 
 export const App = Cloudflare.Website.Foldkit("App", {
   main: "src/platform/cloudflare/edge.ts",
-  env: { API: Api, BASE_PATH: basePath },
+  env: { API: Api },
   // Behind Cloudflare Access when deployed (see access.ts); open in local dev.
   ...(isDev ? {} : { access: AccessApp }),
-  // Static assets are matched against the full path, so API calls are
-  // `<base>api/*` (`/api/*` unless deployed under a project path).
-  assets: { runWorkerFirst: [`${basePath}api/*`] },
+  assets: { runWorkerFirst: ["/api/*"] },
   ...Option.match(prodRoute, { onNone: () => ({}), onSome: ({ routes }) => ({ routes }) }),
   compatibility: { date: "2026-10-04" },
   observability: {
@@ -81,7 +67,7 @@ const state = Layer.unwrap(
 
 // The stack name keys Alchemy state and prefixes resource names.
 export default Alchemy.Stack(
-  stackName,
+  "entity-store",
   { providers: Cloudflare.providers(), state },
   Effect.gen(function* () {
     yield* Api;
