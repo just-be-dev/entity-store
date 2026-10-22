@@ -107,6 +107,57 @@ export const HistoryPage = Schema.Struct({
 });
 export type HistoryPage = typeof HistoryPage.Type;
 
+// ─── Changes ────────────────────────────────────────────────────────────────
+
+/** Change metadata is limited to this many bytes of JSON. */
+export const MAX_META_BYTES = 1024;
+
+/**
+ * What a writer attaches to a change, such as a causal chain's depth. Stored
+ * on the change row and returned with it; the store doesn't interpret it.
+ */
+export const ChangeMeta = Schema.Record(Schema.String, Schema.Json).check(
+  Schema.makeFilter(
+    (meta) =>
+      new TextEncoder().encode(JSON.stringify(meta)).byteLength <= MAX_META_BYTES ||
+      `meta is limited to ${MAX_META_BYTES} bytes of JSON`,
+  ),
+);
+export type ChangeMeta = typeof ChangeMeta.Type;
+
+/** One committed write, in commit order. What a queue message carries. */
+export const ChangeEvent = Schema.Struct({
+  v: Schema.Literal(1),
+  seq: Schema.Int,
+  type: TypeName,
+  id: EntityId,
+  rev: Rev,
+  op: Operation,
+  meta: Schema.NullOr(Schema.Record(Schema.String, Schema.Json)),
+  createdAt: Schema.Finite,
+});
+export type ChangeEvent = typeof ChangeEvent.Type;
+
+/**
+ * A change with its data, lensed to `version`. `before` is the data at
+ * `rev - 1` (null when there was none, or it was a delete); `after` is the
+ * data at `rev` (null for a delete).
+ */
+export const Change = Schema.Struct({
+  ...ChangeEvent.fields,
+  version: Version,
+  before: Schema.NullOr(Schema.Json),
+  after: Schema.NullOr(Schema.Json),
+});
+export type Change = typeof Change.Type;
+
+export const ChangePage = Schema.Struct({
+  items: Schema.Array(ChangeEvent),
+  /** Pass as `after` to read the next page; absent on the last page. */
+  nextAfter: Schema.optionalKey(Schema.Int),
+});
+export type ChangePage = typeof ChangePage.Type;
+
 // ─── Links ──────────────────────────────────────────────────────────────────
 
 /** An entity that links to another, and the field path it links from. */
@@ -175,6 +226,12 @@ export class TypeNotFound extends Schema.TaggedError<TypeNotFound>()("TypeNotFou
   type: Schema.String,
 }) {}
 
+/** The type can't be deleted: it has live entities, or other types' schemas link to it. */
+export class TypeInUse extends Schema.TaggedError<TypeInUse>()("TypeInUse", {
+  type: Schema.String,
+  reasons: Schema.Array(Schema.String),
+}) {}
+
 export class TypeAlreadyExists extends Schema.TaggedError<TypeAlreadyExists>()(
   "TypeAlreadyExists",
   { type: Schema.String },
@@ -216,6 +273,18 @@ export class EntityAlreadyExists extends Schema.TaggedError<EntityAlreadyExists>
   "EntityAlreadyExists",
   { id: Schema.String },
 ) {}
+
+/** An upsert named a type, but the id belongs to an entity of another type. */
+export class EntityTypeMismatch extends Schema.TaggedError<EntityTypeMismatch>()(
+  "EntityTypeMismatch",
+  { id: Schema.String, type: Schema.String, actual: Schema.String },
+) {}
+
+/** No change is recorded for this revision: it predates the change feed, or its type was deleted. */
+export class ChangeNotFound extends Schema.TaggedError<ChangeNotFound>()("ChangeNotFound", {
+  id: Schema.String,
+  rev: Schema.Finite,
+}) {}
 
 export class RevisionNotFound extends Schema.TaggedError<RevisionNotFound>()("RevisionNotFound", {
   id: Schema.String,
@@ -297,6 +366,7 @@ export class StorageFailure extends Schema.TaggedError<StorageFailure>()("Storag
 export type StoreError =
   | TypeNotFound
   | TypeAlreadyExists
+  | TypeInUse
   | VersionNotFound
   | VersionConflict
   | InvalidSchema
@@ -305,6 +375,8 @@ export type StoreError =
   | EntityNotFound
   | EntityDeleted
   | EntityAlreadyExists
+  | EntityTypeMismatch
+  | ChangeNotFound
   | RevisionNotFound
   | RevConflict
   | ValidationFailed

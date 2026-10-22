@@ -168,10 +168,11 @@ describe("entity HTTP API", () => {
       expect(deep.body.error).toMatch(/nest/);
 
       yield* call("POST", "/api/types", { name: "person", schema: personSchema });
-      const missingVersion = yield* call("POST", "/api/types/person/entities", {
+      const badVersion = yield* call("POST", "/api/types/person/entities", {
+        version: 0,
         data: { name: "A", email: "a@b.co" },
       });
-      expect(missingVersion.status).toBe(400);
+      expect(badVersion.status).toBe(400);
       const wrongData = yield* call("POST", "/api/types/person/entities", {
         version: 1,
         data: { name: "A", email: "not-an-email" },
@@ -347,6 +348,120 @@ describe("entity HTTP API", () => {
       expect(broken.body.issues[0].path).toBe("ops[0].forward.n");
       const fns = yield* call("GET", "/api/lens/functions");
       expect(fns.body.items.map((f: { name: string }) => f.name)).toContain("split");
+    }),
+  );
+
+  it.effect("upserts by type and id, with meta, and lists changes", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      const id = "ada.lovelace@example.com";
+      const path = `/api/types/person/entities/${encodeURIComponent(id)}`;
+
+      const created = yield* call("PUT", path, {
+        patch: { name: "Ada", email: "a@b.co" },
+        expectedRev: 0,
+        meta: { depth: 1, changeId: "c1" },
+      });
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({ created: true, entity: { id, rev: 1, version: 1 } });
+
+      const patched = yield* call("PUT", path, { patch: { name: "Ada L." }, expectedRev: 1 });
+      expect(patched.status).toBe(200);
+      expect(patched.body).toMatchObject({ created: false, entity: { rev: 2 } });
+      const stale = yield* call("PUT", path, { patch: { name: "x" }, expectedRev: 1 });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ code: "RevConflict", currentRev: 2 });
+      expect((yield* call("GET", `/api/entities/${encodeURIComponent(id)}`)).body.data).toEqual({
+        name: "Ada L.",
+        email: "a@b.co",
+      });
+
+      yield* call("POST", "/api/types", {
+        name: "note",
+        schema: { fields: { text: { type: "string" } } },
+      });
+      const mismatch = yield* call("PUT", `/api/types/note/entities/${encodeURIComponent(id)}`, {
+        patch: { text: "x" },
+      });
+      expect(mismatch.status).toBe(409);
+      expect(mismatch.body).toMatchObject({
+        code: "EntityTypeMismatch",
+        id,
+        type: "note",
+        actual: "person",
+      });
+
+      // Deletes take meta (and expectedRev) in an optional body.
+      const deleted = yield* call("DELETE", `/api/entities/${encodeURIComponent(id)}`, {
+        expectedRev: 2,
+        meta: { depth: 2 },
+      });
+      expect(deleted.body).toEqual({ id, rev: 3 });
+
+      const changes = yield* call("GET", "/api/changes?after=0&limit=2");
+      expect(changes.status).toBe(200);
+      expect(changes.body.items).toEqual([
+        {
+          v: 1,
+          seq: 1,
+          type: "person",
+          id,
+          rev: 1,
+          op: "create",
+          meta: { depth: 1, changeId: "c1" },
+          createdAt: expect.any(Number),
+        },
+        {
+          v: 1,
+          seq: 2,
+          type: "person",
+          id,
+          rev: 2,
+          op: "patch",
+          meta: null,
+          createdAt: expect.any(Number),
+        },
+      ]);
+      expect(changes.body.nextAfter).toBe(2);
+      const rest = yield* call("GET", "/api/changes?after=2");
+      expect(rest.body.items.map((c: { op: string; meta: unknown }) => [c.op, c.meta])).toEqual([
+        ["delete", { depth: 2 }],
+      ]);
+      expect((yield* call("GET", "/api/changes?after=-1")).status).toBe(400);
+
+      const tooBig = yield* call("PUT", path, {
+        patch: { name: "x" },
+        meta: { pad: "x".repeat(1100) },
+      });
+      expect(tooBig.status).toBe(400);
+      const notObject = yield* call("PATCH", `/api/entities/${encodeURIComponent(id)}`, {
+        patch: {},
+        meta: [1],
+      });
+      expect(notObject.status).toBe(400);
+    }),
+  );
+
+  it.effect("deletes unused types and refuses ones in use", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      yield* call("POST", "/api/types/person/entities", {
+        id: "ada",
+        data: { name: "Ada", email: "a@b.co" },
+      });
+      const inUse = yield* call("DELETE", "/api/types/person");
+      expect(inUse.status).toBe(409);
+      expect(inUse.body).toMatchObject({
+        code: "TypeInUse",
+        type: "person",
+        reasons: ["it has 1 live entity"],
+      });
+      yield* call("DELETE", "/api/entities/ada");
+      expect((yield* call("DELETE", "/api/types/person")).body).toEqual({ name: "person" });
+      expect((yield* call("GET", "/api/types/person")).status).toBe(404);
+      expect((yield* call("DELETE", "/api/types/person")).status).toBe(404);
     }),
   );
 });

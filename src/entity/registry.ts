@@ -32,32 +32,53 @@ export interface LoadedIndexes {
 
 /**
  * Compiled schema versions and index definitions, shared across requests for
- * the isolate's lifetime. Versions are immutable once written, so entries
- * never go stale; only the latest-version pointer is read from storage each
- * time. Index definitions are keyed by the type's `indexes_rev`, which every
- * write reads with the entity and re-checks in its batch.
+ * the isolate's lifetime. Versions are immutable for as long as their type
+ * exists, so entries never go stale; only the latest-version pointer is read
+ * from storage each time. A deleted type can be created again under the same
+ * name, so versions are keyed by the type's `incarnation` as last observed in
+ * a type row. Index definitions are keyed by the type's `indexes_rev`, which
+ * every write reads with the entity and re-checks in its batch.
  */
 export class VersionCache extends Context.Service<
   VersionCache,
   {
+    /** Record the incarnation a type row was read with. */
+    readonly observe: (type: string, incarnation: string) => void;
+    /** A version of the type's observed incarnation. */
     readonly get: (type: string, version: number) => LoadedVersion | undefined;
-    readonly set: (loaded: LoadedVersion) => void;
+    readonly set: (loaded: LoadedVersion, incarnation: string) => void;
+    readonly isObserved: (type: string) => boolean;
     readonly getIndexes: (type: string) => LoadedIndexes | undefined;
     readonly setIndexes: (type: string, indexes: LoadedIndexes) => void;
   }
 >()("entity-store/VersionCache") {
   static readonly make = () => {
     const entries = new Map<string, LoadedVersion>();
+    const incarnations = new Map<string, string>();
     const indexes = new Map<string, LoadedIndexes>();
-    const key = (type: string, version: number) => `${type}\u0000${version}`;
+    const key = (type: string, incarnation: string, version: number) =>
+      `${type}\u0000${incarnation}\u0000${version}`;
     return VersionCache.of({
-      get: (type, version) => entries.get(key(type, version)),
-      set: (loaded) => {
+      observe: (type, incarnation) => {
+        if (incarnations.get(type) !== incarnation) {
+          if (incarnations.size >= MAX_CACHED) {
+            incarnations.clear();
+          }
+          incarnations.set(type, incarnation);
+          indexes.delete(type);
+        }
+      },
+      get: (type, version) => {
+        const incarnation = incarnations.get(type);
+        return incarnation === undefined ? undefined : entries.get(key(type, incarnation, version));
+      },
+      set: (loaded, incarnation) => {
         if (entries.size >= MAX_CACHED) {
           entries.clear();
         }
-        entries.set(key(loaded.info.type, loaded.info.version), loaded);
+        entries.set(key(loaded.info.type, incarnation, loaded.info.version), loaded);
       },
+      isObserved: (type) => incarnations.has(type),
       getIndexes: (type) => indexes.get(type),
       setIndexes: (type, loaded) => {
         if (indexes.size >= MAX_CACHED) {
@@ -75,6 +96,7 @@ const TypeRow = Schema.Struct({
   description: Schema.String,
   latest_version: Schema.Number,
   indexes_rev: Schema.Number,
+  incarnation: Schema.String,
   created_at: Schema.Number,
   updated_at: Schema.Number,
 });
@@ -86,6 +108,8 @@ const VersionRow = Schema.Struct({
   lens: Schema.NullOr(Schema.fromJsonString(Lens)),
   note: Schema.String,
   created_at: Schema.Number,
+  /** The type's incarnation, read in the same statement as the version. */
+  incarnation: Schema.String,
 });
 
 export const decodeRows =
@@ -120,7 +144,9 @@ export const makeRegistry = Effect.gen(function* () {
     const rows = yield* db
       .all(sql("SELECT * FROM entity_types ORDER BY name"))
       .pipe(Effect.mapError(storageFailure));
-    return (yield* decodeRows(TypeRow, "type")(rows)).map(toSummary);
+    const decoded = yield* decodeRows(TypeRow, "type")(rows);
+    decoded.forEach((row) => cache.observe(row.name, row.incarnation));
+    return decoded.map(toSummary);
   });
 
   /** A type with the `indexes_rev` its writers must check. */
@@ -132,7 +158,12 @@ export const makeRegistry = Effect.gen(function* () {
     if (row === undefined) {
       return yield* new TypeNotFound({ type: name });
     }
-    return { summary: toSummary(row), indexesRev: row.indexes_rev };
+    cache.observe(name, row.incarnation);
+    return {
+      summary: toSummary(row),
+      indexesRev: row.indexes_rev,
+      incarnation: row.incarnation,
+    };
   });
 
   const getType = Effect.fn("Registry.getType")(function* (name: string) {
@@ -186,7 +217,7 @@ export const makeRegistry = Effect.gen(function* () {
       const rows = yield* db
         .all(
           sql(
-            "SELECT * FROM schema_versions WHERE type = ? AND version BETWEEN ? AND ? ORDER BY version",
+            "SELECT v.*, t.incarnation FROM schema_versions v JOIN entity_types t ON t.name = v.type WHERE v.type = ? AND v.version BETWEEN ? AND ? ORDER BY v.version",
             type,
             Math.min(...missing),
             Math.max(...missing),
@@ -195,7 +226,12 @@ export const makeRegistry = Effect.gen(function* () {
         .pipe(Effect.mapError(storageFailure));
       for (const row of yield* decodeRows(VersionRow, "schema version")(rows)) {
         const loaded = yield* toLoaded(row);
-        cache.set(loaded);
+        // Cache under the incarnation read with the row, never the observed
+        // one: the type may have been deleted and recreated in between.
+        if (!cache.isObserved(type)) {
+          cache.observe(type, row.incarnation);
+        }
+        cache.set(loaded, row.incarnation);
         found.set(loaded.info.version, loaded);
       }
     }

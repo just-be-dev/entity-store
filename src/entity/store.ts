@@ -2,6 +2,7 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
@@ -16,11 +17,15 @@ import { checkDefinition, compiled } from "../schema/compile.ts";
 import type { Link } from "../schema/links.ts";
 import { diffLinks, extractLinks, linkedTypes } from "../schema/links.ts";
 import type { EntitySchema } from "../schema/model.ts";
+import { ChangeRow, recordChange, toChangeEvent } from "./changes.ts";
 import type { IndexDefinition, LoadedIndex } from "./indexes.ts";
 import { MAX_INDEXES_PER_TYPE, checkIndexDefinition, indexKeys, keysMinus } from "./indexes.ts";
 import type {
   Backlink,
   BacklinkPage,
+  Change,
+  ChangeMeta,
+  ChangePage,
   Entity,
   EntityPage,
   IndexInfo,
@@ -33,10 +38,12 @@ import type {
   VersionInfo,
 } from "./model.ts";
 import {
+  ChangeNotFound,
   EntityAlreadyExists,
   EntityDeleted,
   EntityLinked,
   EntityNotFound,
+  EntityTypeMismatch,
   IndexAlreadyExists,
   IndexKeyFailed,
   IndexNotFound,
@@ -52,6 +59,7 @@ import {
   RevisionNotFound,
   StorageFailure,
   TypeAlreadyExists,
+  TypeInUse,
   TypeNotFound,
   UniqueViolation,
   ValidationFailed,
@@ -81,8 +89,13 @@ const EntityRow = Schema.Struct({
 });
 type EntityRow = typeof EntityRow.Type;
 
-/** The head row a writer reads, with the type's `indexes_rev`. */
-const HeadRow = Schema.Struct({ ...EntityRow.fields, indexes_rev: Schema.Number });
+/** The head row a writer reads, with the type's `indexes_rev` and incarnation. */
+const HeadRow = Schema.Struct({
+  ...EntityRow.fields,
+  indexes_rev: Schema.Number,
+  incarnation: Schema.String,
+});
+type HeadRow = typeof HeadRow.Type;
 
 const IndexRow = Schema.Struct({
   type: Schema.String,
@@ -134,6 +147,7 @@ const RevisionRow = Schema.Struct({
   created_at: Schema.Number,
   type: Schema.String,
   latest_version: Schema.Number,
+  incarnation: Schema.String,
 });
 
 const storageFailure = (error: SqlError) => new StorageFailure({ message: error.message });
@@ -145,6 +159,12 @@ const chunks = <A>(items: ReadonlyArray<A>, size = MAX_IN): Array<ReadonlyArray<
     items.slice(i * size, (i + 1) * size),
   );
 const placeholders = (items: ReadonlyArray<unknown>) => items.map(() => "?").join(", ");
+
+const randomHex = (length: number) =>
+  Effect.map(
+    Effect.forEach(Array.from({ length }), () => Random.next),
+    (draws) => draws.map((r) => Math.floor(r * 16).toString(16)).join(""),
+  );
 
 // ─── Inputs ─────────────────────────────────────────────────────────────────
 
@@ -163,10 +183,15 @@ export interface VersionInput {
 }
 
 export interface WriteOptions {
-  /** The schema version the writer speaks. Required: old writers stay pinned. */
-  readonly version: number;
+  /**
+   * The schema version the writer speaks. Omitted, it's the type's latest
+   * version at the time of the write; old writers that name theirs stay pinned.
+   */
+  readonly version?: number | undefined;
   /** Fail with RevConflict unless the entity is at this revision. */
   readonly expectedRev?: number | undefined;
+  /** Stored on the write's change row and returned with it; not interpreted. */
+  readonly meta?: ChangeMeta | undefined;
 }
 
 export interface CreateIndexInput {
@@ -346,7 +371,7 @@ const makeEntityStore = Effect.gen(function* () {
     // One query, so the definitions and the rev are a consistent snapshot.
     const rows = yield* all(
       sql(
-        "SELECT t.indexes_rev AS rev, i.* FROM entity_types t LEFT JOIN entity_indexes i ON i.type = t.name AND i.state != 'failed' WHERE t.name = ?",
+        "SELECT t.indexes_rev AS rev, t.incarnation AS incarnation, i.* FROM entity_types t LEFT JOIN entity_indexes i ON i.type = t.name AND i.state != 'failed' WHERE t.name = ?",
         type,
       ),
     );
@@ -354,6 +379,7 @@ const makeEntityStore = Effect.gen(function* () {
     if (first === undefined) {
       return yield* new TypeNotFound({ type });
     }
+    cache.observe(type, String(first["incarnation"]));
     const defined = rows.filter((row) => row["name"] !== null && row["name"] !== undefined);
     const items: Array<LoadedIndex> = [];
     for (const row of yield* decodeRows(IndexRow, "index")(defined)) {
@@ -579,12 +605,20 @@ const makeEntityStore = Effect.gen(function* () {
   const createType = Effect.fn("EntityStore.createType")(function* (input: CreateTypeInput) {
     yield* definitionIssues(input.schema, input.name);
     const now = yield* Clock.currentTimeMillis;
+    // A deleted type's name can be reused. A fresh incarnation keeps cached
+    // versions of the old type apart, and a random starting indexes_rev means
+    // a writer or backfill still holding the old type's rev (or an index
+    // generation derived from it) fails its guard instead of matching.
+    const incarnation = yield* randomHex(16);
+    const indexesRev = yield* Random.nextIntBetween(0, 2 ** 31);
     yield* db
       .batch([
         sql(
-          "INSERT INTO entity_types (name, description, latest_version, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+          "INSERT INTO entity_types (name, description, latest_version, indexes_rev, incarnation, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, ?)",
           input.name,
           input.description ?? "",
+          indexesRev,
+          incarnation,
           now,
           now,
         ),
@@ -650,7 +684,16 @@ const makeEntityStore = Effect.gen(function* () {
     input: Omit<VersionInput, "force" | "note">,
     options?: { readonly samples?: number },
   ) {
-    const summary = yield* registry.getType(name);
+    const { from, to, report } = yield* checkNext(name, input, options);
+    return { from, to, report };
+  });
+
+  const checkNext = Effect.fn("EntityStore.checkNext")(function* (
+    name: string,
+    input: Omit<VersionInput, "force" | "note">,
+    options?: { readonly samples?: number },
+  ) {
+    const { summary, incarnation } = yield* registry.typeState(name);
     const to = yield* definitionIssues(input.schema, name);
     const lens = compileLens(input.lens);
     if (Result.isFailure(lens)) {
@@ -665,35 +708,40 @@ const makeEntityStore = Effect.gen(function* () {
       existing,
       ...(options?.samples === undefined ? {} : { samples: options.samples }),
     });
-    return { from: summary.latestVersion, to: summary.latestVersion + 1, report };
+    return { from: summary.latestVersion, to: summary.latestVersion + 1, report, incarnation };
   });
 
   const addVersion = Effect.fn("EntityStore.addVersion")(function* (
     name: string,
     input: VersionInput,
   ) {
-    const checked = yield* checkVersion(name, input);
+    const checked = yield* checkNext(name, input);
     if (!checked.report.ok && input.force !== true) {
       return yield* new LensCheckFailed({ report: checked.report });
     }
     const now = yield* Clock.currentTimeMillis;
+    // Both statements match only the type as checked (same latest version and
+    // incarnation), so a type deleted and recreated meanwhile gets neither.
     const results = yield* db
       .batch([
         sql(
-          "INSERT INTO schema_versions (type, version, schema, lens, note, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-          name,
+          "INSERT INTO schema_versions (type, version, schema, lens, note, created_at) SELECT name, ?, ?, ?, ?, ? FROM entity_types WHERE name = ? AND latest_version = ? AND incarnation = ?",
           checked.to,
           JSON.stringify(input.schema),
           JSON.stringify(input.lens),
           input.note ?? "",
           now,
+          name,
+          checked.from,
+          checked.incarnation,
         ),
         sql(
-          "UPDATE entity_types SET latest_version = ?, updated_at = ? WHERE name = ? AND latest_version = ?",
+          "UPDATE entity_types SET latest_version = ?, updated_at = ? WHERE name = ? AND latest_version = ? AND incarnation = ?",
           checked.to,
           now,
           name,
           checked.from,
+          checked.incarnation,
         ),
       ])
       .pipe(
@@ -704,8 +752,9 @@ const makeEntityStore = Effect.gen(function* () {
         ),
       );
     if (results[1]?.changes !== 1) {
-      // NOTE: D1 batches are transactions, so a lost race here also failed the
-      // insert above on its primary key; this is a belt-and-braces check.
+      // Another version was added first (the insert above then failed on its
+      // primary key or matched nothing, aborting or skipping both), or the
+      // type was deleted.
       return yield* new VersionConflict({ type: name, expected: checked.from });
     }
     const info: VersionInfo = (yield* registry.version(name, checked.to)).info;
@@ -717,7 +766,7 @@ const makeEntityStore = Effect.gen(function* () {
   const readRow = Effect.fn("EntityStore.readRow")(function* (id: string) {
     const rows = yield* all(
       sql(
-        "SELECT e.*, t.latest_version, t.indexes_rev FROM entities e JOIN entity_types t ON t.name = e.type WHERE e.id = ?",
+        "SELECT e.*, t.latest_version, t.indexes_rev, t.incarnation FROM entities e JOIN entity_types t ON t.name = e.type WHERE e.id = ?",
         id,
       ),
     );
@@ -725,6 +774,7 @@ const makeEntityStore = Effect.gen(function* () {
     if (row === undefined) {
       return yield* new EntityNotFound({ id });
     }
+    cache.observe(row.type, row.incarnation);
     return row;
   });
 
@@ -745,11 +795,8 @@ const makeEntityStore = Effect.gen(function* () {
 
   const newId = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
-    const nibbles = yield* Effect.forEach(Array.from({ length: 19 }), () =>
-      Effect.map(Random.next, (r) => Math.floor(r * 16).toString(16)),
-    );
     const ts = Math.floor(now).toString(16).padStart(12, "0").slice(-12);
-    const rand = nibbles.join("");
+    const rand = yield* randomHex(19);
     const variant = ((parseInt(rand.charAt(3), 16) & 0x3) | 0x8).toString(16);
     // UUIDv7 layout: time-ordered, so ids sort roughly by creation time.
     return `${ts.slice(0, 8)}-${ts.slice(8)}-7${rand.slice(0, 3)}-${variant}${rand.slice(4, 7)}-${rand.slice(7, 19)}`;
@@ -765,56 +812,70 @@ const makeEntityStore = Effect.gen(function* () {
       rev,
     );
 
+  /** Insert a new entity at rev 1. No retry: callers decide what a lost race means. */
+  const insertNew = (
+    type: string,
+    input: {
+      readonly id?: string | undefined;
+      readonly version?: number | undefined;
+      readonly data: unknown;
+      readonly meta?: ChangeMeta | undefined;
+    },
+  ) =>
+    Effect.gen(function* () {
+      const { summary, indexesRev } = yield* registry.typeState(type);
+      const version = input.version ?? summary.latestVersion;
+      yield* requireVersion(type, version, summary.latestVersion);
+      const data = yield* validate(type, version, input.data);
+      const id = input.id ?? (yield* newId);
+      const links = yield* linksOf(type, version, data);
+      yield* checkTargets(links, { id, type });
+      const indexes = yield* loadIndexes(type, indexesRev);
+      const entries = yield* indexWrites(type, id, indexes.items, undefined, { version, data });
+      const now = yield* Clock.currentTimeMillis;
+      yield* db
+        .batch([
+          indexGuard(type, indexes.rev),
+          sql(
+            "INSERT INTO entities (id, type, version, rev, data, deleted, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 0, ?, ?)",
+            id,
+            type,
+            version,
+            JSON.stringify(data),
+            now,
+            now,
+          ),
+          appendRevision(id, 1, version, "create"),
+          ...links.map((link) => insertLink(id, link)),
+          ...entries,
+          recordChange({ id, type, rev: 1, op: "create", meta: input.meta, at: now }),
+        ])
+        .pipe(Effect.mapError(writeError(type, id, () => new EntityAlreadyExists({ id }))));
+      const entity: Entity = {
+        id: id as Entity["id"],
+        type,
+        version,
+        storedVersion: version,
+        rev: 1,
+        data,
+        createdAt: now,
+        updatedAt: now,
+      };
+      return entity;
+    });
+
   const create = Effect.fn("EntityStore.create")(function* (
     type: string,
-    input: { readonly id?: string | undefined; readonly version: number; readonly data: unknown },
+    input: {
+      readonly id?: string | undefined;
+      readonly version?: number | undefined;
+      readonly data: unknown;
+      readonly meta?: ChangeMeta | undefined;
+    },
   ) {
-    const { summary, indexesRev } = yield* registry.typeState(type);
-    yield* requireVersion(type, input.version, summary.latestVersion);
-    const data = yield* validate(type, input.version, input.data);
-    const id = input.id ?? (yield* newId);
-    const links = yield* linksOf(type, input.version, data);
-    yield* checkTargets(links, { id, type });
-    const now = yield* Clock.currentTimeMillis;
-    let attempt = 0;
-    yield* retryOnIndexChange(
-      Effect.gen(function* () {
-        // A retry means the definitions changed: never trust the cache for it.
-        const indexes = yield* loadIndexes(type, attempt++ === 0 ? indexesRev : -1);
-        const entries = yield* indexWrites(type, id, indexes.items, undefined, {
-          version: input.version,
-          data,
-        });
-        yield* db
-          .batch([
-            indexGuard(type, indexes.rev),
-            sql(
-              "INSERT INTO entities (id, type, version, rev, data, deleted, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 0, ?, ?)",
-              id,
-              type,
-              input.version,
-              JSON.stringify(data),
-              now,
-              now,
-            ),
-            appendRevision(id, 1, input.version, "create"),
-            ...links.map((link) => insertLink(id, link)),
-            ...entries,
-          ])
-          .pipe(Effect.mapError(writeError(type, id, () => new EntityAlreadyExists({ id }))));
-      }),
-    );
-    const entity: Entity = {
-      id: id as Entity["id"],
-      type,
-      version: input.version,
-      storedVersion: input.version,
-      rev: 1,
-      data,
-      createdAt: now,
-      updatedAt: now,
-    };
-    return entity;
+    // Each attempt re-reads the type, so a retry after the index definitions
+    // changed never reuses the stale ones.
+    return yield* retryOnIndexChange(insertNew(type, input));
   });
 
   const get = Effect.fn("EntityStore.get")(function* (
@@ -834,7 +895,7 @@ const makeEntityStore = Effect.gen(function* () {
   });
 
   const revisionQuery = (where: string) =>
-    `SELECT r.*, e.type, t.latest_version FROM entity_revisions r JOIN entities e ON e.id = r.entity_id JOIN entity_types t ON t.name = e.type WHERE ${where}`;
+    `SELECT r.*, e.type, t.latest_version, t.incarnation FROM entity_revisions r JOIN entities e ON e.id = r.entity_id JOIN entity_types t ON t.name = e.type WHERE ${where}`;
 
   const getRevision = Effect.fn("EntityStore.getRevision")(function* (
     id: string,
@@ -846,6 +907,7 @@ const makeEntityStore = Effect.gen(function* () {
     if (row === undefined) {
       return yield* new RevisionNotFound({ id, rev });
     }
+    cache.observe(row.type, row.incarnation);
     const version = requested ?? row.latest_version;
     yield* requireVersion(row.type, version, row.latest_version);
     const data = yield* project(row.type, row.data, row.version, version);
@@ -918,7 +980,8 @@ const makeEntityStore = Effect.gen(function* () {
   });
 
   /**
-   * The write path shared by replace, patch, and delete.
+   * Write the next revision of `row`. Shared by replace, patch, delete, and
+   * upsert. No retry: callers decide what a lost race means.
    *
    * The writer sees the entity at its own version, and its change is validated
    * against that version's schema. Then:
@@ -928,34 +991,29 @@ const makeEntityStore = Effect.gen(function* () {
    *   before and after documents are lensed up to the stored version, diffed,
    *   and the diff applied to the stored data. Fields the old writer can't see
    *   are left alone.
+   *
+   * A tombstone `row` is recreated (op `create`): `change` starts from `{}`,
+   * and the deleted data plays no part. Its links and index keys were already
+   * removed by the delete.
    */
-  const mutate = (
-    id: string,
+  const writeRevision = (
+    row: HeadRow,
     options: WriteOptions,
     op: Operation,
     change: (current: Json) => Json,
   ) =>
     Effect.gen(function* () {
-      const row = yield* readRow(id);
-      if (row.deleted !== 0) {
-        return yield* new EntityDeleted({ id, rev: row.rev });
-      }
-      if (options.expectedRev !== undefined && options.expectedRev !== row.rev) {
-        return yield* new RevConflict({
-          id,
-          expectedRev: options.expectedRev,
-          currentRev: row.rev,
-        });
-      }
+      const id = row.id;
+      const revive = row.deleted !== 0;
       // Deletes don't speak a version; record them at the stored one on every attempt.
-      const writer = op === "delete" ? row.version : options.version;
+      const writer = op === "delete" ? row.version : (options.version ?? row.latest_version);
       yield* requireVersion(row.type, writer, row.latest_version);
-      const before = yield* project(row.type, row.data, row.version, writer);
+      const before: Json = revive ? {} : yield* project(row.type, row.data, row.version, writer);
       const after = op === "delete" ? before : yield* validate(row.type, writer, change(before));
 
       let storedVersion = writer;
       let stored = after;
-      if (writer < row.version) {
+      if (!revive && writer < row.version) {
         const beforeUp = yield* project(row.type, before, writer, row.version);
         const afterUp = yield* project(row.type, after, writer, row.version);
         storedVersion = row.version;
@@ -970,7 +1028,7 @@ const makeEntityStore = Effect.gen(function* () {
         }
       }
 
-      const oldLinks = yield* linksOf(row.type, row.version, row.data);
+      const oldLinks = revive ? [] : yield* linksOf(row.type, row.version, row.data);
       const newLinks = op === "delete" ? [] : yield* linksOf(row.type, storedVersion, stored);
       const links = diffLinks(oldLinks, newLinks);
       yield* checkTargets(links.added, { id, type: row.type });
@@ -988,11 +1046,12 @@ const makeEntityStore = Effect.gen(function* () {
         row.type,
         id,
         indexes.items,
-        { version: row.version, data: row.data },
+        revive ? undefined : { version: row.version, data: row.data },
         op === "delete" ? undefined : { version: storedVersion, data: stored },
       );
 
       const now = yield* Clock.currentTimeMillis;
+      const createdAt = revive ? now : row.created_at;
       const nextRev = row.rev + 1;
       const json = JSON.stringify(stored);
       // The guard aborts the batch if index definitions changed since they were
@@ -1016,17 +1075,19 @@ const makeEntityStore = Effect.gen(function* () {
           // to itself doesn't trip the delete guard.
           ...links.removed.map((link) => deleteLink(id, link)),
           sql(
-            "UPDATE entities SET version = ?, rev = ?, data = ?, deleted = ?, updated_at = ? WHERE id = ? AND rev = ?",
+            "UPDATE entities SET version = ?, rev = ?, data = ?, deleted = ?, created_at = ?, updated_at = ? WHERE id = ? AND rev = ?",
             storedVersion,
             nextRev,
             json,
             op === "delete" ? 1 : 0,
+            createdAt,
             now,
             id,
             row.rev,
           ),
           ...links.added.map((link) => insertLink(id, link)),
           ...entries,
+          recordChange({ id, type: row.type, rev: nextRev, op, meta: options.meta, at: now }),
         ])
         .pipe(
           Effect.mapError(
@@ -1049,20 +1110,46 @@ const makeEntityStore = Effect.gen(function* () {
         storedVersion,
         rev: nextRev,
         data: storedVersion === writer ? stored : after,
-        createdAt: row.created_at,
+        createdAt,
         updatedAt: now,
       };
       return entity;
-    }).pipe(
-      // Blind writes (no expectedRev) retry a lost race against a fresh read,
-      // with jittered backoff so hot entities don't retry in lockstep.
-      Effect.retry({
-        schedule: Schedule.jittered(Schedule.exponential("10 millis")),
-        times: options.expectedRev === undefined ? WRITE_ATTEMPTS - 1 : 0,
-        while: (error) => error._tag === "RevConflict",
-      }),
-      retryOnIndexChange,
-    );
+    });
+
+  /** Blind writes (no expectedRev) retry a lost race against a fresh read. */
+  const retryLostRace =
+    (expectedRev: number | undefined) =>
+    <A, E extends { readonly _tag: string }, R>(write: Effect.Effect<A, E, R>) =>
+      write.pipe(
+        // Jittered backoff, so hot entities don't retry in lockstep.
+        Effect.retry({
+          schedule: Schedule.jittered(Schedule.exponential("10 millis")),
+          times: expectedRev === undefined ? WRITE_ATTEMPTS - 1 : 0,
+          while: (error) => error._tag === "RevConflict",
+        }),
+      );
+
+  /** Replace, patch, or delete a live entity. */
+  const mutate = (
+    id: string,
+    options: WriteOptions,
+    op: Operation,
+    change: (current: Json) => Json,
+  ) =>
+    Effect.gen(function* () {
+      const row = yield* readRow(id);
+      if (row.deleted !== 0) {
+        return yield* new EntityDeleted({ id, rev: row.rev });
+      }
+      if (options.expectedRev !== undefined && options.expectedRev !== row.rev) {
+        return yield* new RevConflict({
+          id,
+          expectedRev: options.expectedRev,
+          currentRev: row.rev,
+        });
+      }
+      return yield* writeRevision(row, options, op, change);
+    }).pipe(retryLostRace(options.expectedRev), retryOnIndexChange);
 
   /**
    * Every write, including ones with `expectedRev`, retries when index
@@ -1102,9 +1189,79 @@ const makeEntityStore = Effect.gen(function* () {
     );
   });
 
+  /** The entity's live revision, or 0 if it doesn't exist or is deleted. */
+  const liveRev = (id: string) =>
+    readRow(id).pipe(
+      Effect.map((row) => (row.deleted === 0 ? row.rev : 0)),
+      Effect.catchTag("EntityNotFound", () => Effect.succeed(0)),
+    );
+
+  /**
+   * Create or merge-patch the entity `id` of `type`:
+   * - missing: created from `patch` with `null` members dropped;
+   * - live: `patch` applied as an RFC 7386 merge patch;
+   * - a tombstone of `type`: recreated from `patch` (op `create`, next rev).
+   * `expectedRev: 0` means "must not exist or be deleted"; any other value
+   * must match the live rev.
+   */
+  const upsert = Effect.fn("EntityStore.upsert")(function* (
+    type: string,
+    id: string,
+    options: WriteOptions & { readonly patch: unknown },
+  ) {
+    const changes = options.patch as Json;
+    const expected = options.expectedRev;
+    const conflict = (currentRev: number) =>
+      new RevConflict({ id, expectedRev: expected ?? 0, currentRev });
+    const attempt = Effect.gen(function* () {
+      const found = yield* readRow(id).pipe(
+        Effect.map(Option.some),
+        Effect.catchTag("EntityNotFound", () => Effect.succeedNone),
+      );
+      if (Option.isNone(found)) {
+        if (expected !== undefined && expected !== 0) {
+          return yield* conflict(0);
+        }
+        const entity = yield* insertNew(type, {
+          id,
+          version: options.version,
+          data: mergePatch({}, changes),
+          meta: options.meta,
+        });
+        return { entity, created: true };
+      }
+      const row = found.value;
+      if (row.type !== type) {
+        return yield* new EntityTypeMismatch({ id, type, actual: row.type });
+      }
+      const current = row.deleted === 0 ? row.rev : 0;
+      if (expected !== undefined && expected !== current) {
+        return yield* conflict(current);
+      }
+      if (current === 0) {
+        const entity = yield* writeRevision(row, options, "create", (empty) =>
+          mergePatch(empty, changes),
+        );
+        return { entity, created: true };
+      }
+      const entity = yield* writeRevision(row, options, "patch", (data) =>
+        mergePatch(data, changes),
+      );
+      return { entity, created: false };
+    });
+    return yield* attempt.pipe(
+      // Another writer created the entity between our read and our insert.
+      Effect.catchTag("EntityAlreadyExists", () =>
+        Effect.flatMap(liveRev(id), (rev) => Effect.fail(conflict(rev))),
+      ),
+      retryLostRace(expected),
+      retryOnIndexChange,
+    );
+  });
+
   const remove = Effect.fn("EntityStore.remove")(function* (
     id: string,
-    options?: { readonly expectedRev?: number | undefined },
+    options?: { readonly expectedRev?: number | undefined; readonly meta?: ChangeMeta | undefined },
   ) {
     const row = yield* readRow(id);
     if (row.deleted !== 0) {
@@ -1112,11 +1269,184 @@ const makeEntityStore = Effect.gen(function* () {
     }
     const deleted = yield* mutate(
       id,
-      { version: row.latest_version, expectedRev: options?.expectedRev },
+      { expectedRev: options?.expectedRev, meta: options?.meta },
       "delete",
       (current) => current,
     );
     return { id, rev: deleted.rev };
+  });
+
+  // ── Deleting types ──
+
+  /** Other types whose latest schema links to `name`, as SQL (a `link` node is `"to": name`). */
+  const linkingTypesQuery = (select: string) =>
+    `SELECT ${select} FROM entity_types t JOIN schema_versions v ON v.type = t.name AND v.version = t.latest_version, json_tree(v.schema) j WHERE t.name != ? AND j.key = 'to' AND j.type = 'text' AND j.value = ?`;
+
+  /** Why `name` can't be deleted right now; empty if it can. */
+  const typeInUse = Effect.fn("EntityStore.typeInUse")(function* (name: string) {
+    const reasons: Array<string> = [];
+    const [live] = yield* all(
+      sql(
+        "SELECT count(*) AS n FROM (SELECT 1 FROM entities WHERE type = ? AND deleted = 0 LIMIT 1001)",
+        name,
+      ),
+    );
+    const count = Number(live?.["n"] ?? 0);
+    if (count > 0) {
+      reasons.push(
+        count > 1000
+          ? "it has more than 1000 live entities"
+          : `it has ${count} live ${count === 1 ? "entity" : "entities"}`,
+      );
+    }
+    const linking = yield* all(
+      sql(`${linkingTypesQuery("DISTINCT t.name, t.latest_version")} ORDER BY t.name`, name, name),
+    );
+    for (const row of linking) {
+      reasons.push(
+        `${String(row["name"])}'s latest schema (v${Number(row["latest_version"])}) links to it`,
+      );
+    }
+    return reasons;
+  });
+
+  /**
+   * Delete a type, with its versions, indexes, deleted entities, and their
+   * revisions and changes. Refused with TypeInUse while it has live entities
+   * or another type's latest schema links to it. The type row is deleted
+   * only if both still hold inside the batch, and everything else only if the
+   * type row is gone, so a concurrent create can't lose an entity.
+   */
+  const deleteType = Effect.fn("EntityStore.deleteType")(function* (name: string) {
+    yield* registry.typeState(name);
+    const reasons = yield* typeInUse(name);
+    if (reasons.length > 0) {
+      return yield* new TypeInUse({ type: name, reasons });
+    }
+    const gone = "NOT EXISTS (SELECT 1 FROM entity_types WHERE name = ?)";
+    const ofType = "SELECT id FROM entities WHERE type = ?";
+    const results = yield* db
+      .batch([
+        sql(
+          `DELETE FROM entity_types WHERE name = ? AND NOT EXISTS (SELECT 1 FROM entities WHERE type = ? AND deleted = 0) AND NOT EXISTS (${linkingTypesQuery("1")})`,
+          name,
+          name,
+          name,
+          name,
+        ),
+        sql(`DELETE FROM schema_versions WHERE type = ? AND ${gone}`, name, name),
+        sql(`DELETE FROM entity_indexes WHERE type = ? AND ${gone}`, name, name),
+        sql(`DELETE FROM index_entries WHERE type = ? AND ${gone}`, name, name),
+        sql(
+          `DELETE FROM entity_changes WHERE type = ? AND entity_id IN (${ofType}) AND ${gone}`,
+          name,
+          name,
+          name,
+        ),
+        sql(`DELETE FROM entity_revisions WHERE entity_id IN (${ofType}) AND ${gone}`, name, name),
+        sql(`DELETE FROM entity_links WHERE source IN (${ofType}) AND ${gone}`, name, name),
+        sql(`DELETE FROM entities WHERE type = ? AND ${gone}`, name, name),
+      ])
+      .pipe(Effect.mapError(storageFailure));
+    if (results[0]?.changes !== 1) {
+      // Deleted by someone else, or put to use since the check.
+      yield* registry.typeState(name);
+      const now = yield* typeInUse(name);
+      return yield* new TypeInUse({
+        type: name,
+        reasons: now.length > 0 ? now : ["it changed while being deleted; try again"],
+      });
+    }
+    return { name };
+  });
+
+  // ── Changes ──
+
+  const ChangeHead = Schema.Struct({
+    ...ChangeRow.fields,
+    latest_version: Schema.Number,
+    incarnation: Schema.String,
+  });
+
+  const ChangeRevision = Schema.Struct({
+    rev: Schema.Number,
+    version: Schema.Number,
+    op: Schema.Literals(["create", "replace", "patch", "delete"]),
+    data: StoredJson,
+  });
+
+  /**
+   * The change that produced revision `rev` of `id`, with the data before
+   * and after it, lensed to `version` (default: the type's latest).
+   */
+  const getChange = Effect.fn("EntityStore.getChange")(function* (
+    id: string,
+    rev: number,
+    options?: { readonly version?: number | undefined },
+  ) {
+    const rows = yield* all(
+      sql(
+        "SELECT c.*, t.latest_version, t.incarnation FROM entity_changes c JOIN entity_types t ON t.name = c.type WHERE c.entity_id = ? AND c.rev = ?",
+        id,
+        rev,
+      ),
+    );
+    const [row] = yield* decodeRows(ChangeHead, "change")(rows);
+    if (row === undefined) {
+      return yield* new ChangeNotFound({ id, rev });
+    }
+    cache.observe(row.type, row.incarnation);
+    const version = options?.version ?? row.latest_version;
+    yield* requireVersion(row.type, version, row.latest_version);
+    const revisions = yield* decodeRows(
+      ChangeRevision,
+      "revision",
+    )(
+      yield* all(
+        sql(
+          "SELECT rev, version, op, data FROM entity_revisions WHERE entity_id = ? AND rev BETWEEN ? AND ?",
+          id,
+          rev - 1,
+          rev,
+        ),
+      ),
+    );
+    const current = revisions.find((r) => r.rev === rev);
+    if (current === undefined) {
+      return yield* new StorageFailure({ message: "A change has no matching revision" });
+    }
+    const previous = revisions.find((r) => r.rev === rev - 1);
+    const before =
+      previous === undefined || previous.op === "delete"
+        ? null
+        : yield* project(row.type, previous.data, previous.version, version);
+    const after =
+      row.op === "delete" ? null : yield* project(row.type, current.data, current.version, version);
+    const change: Change = { ...toChangeEvent(row), version, before, after };
+    return change;
+  });
+
+  /** Changes in commit order, after `seq` `after` (default: from the start). */
+  const listChanges = Effect.fn("EntityStore.listChanges")(function* (options?: {
+    readonly after?: number | undefined;
+    readonly limit?: number | undefined;
+  }) {
+    const limit = Math.max(1, Math.min(options?.limit ?? DEFAULT_PAGE, MAX_PAGE));
+    const rows = yield* all(
+      sql(
+        "SELECT * FROM entity_changes WHERE seq > ? ORDER BY seq LIMIT ?",
+        options?.after ?? 0,
+        limit + 1,
+      ),
+    );
+    const decoded = yield* decodeRows(ChangeRow, "change")(rows);
+    const items = decoded.slice(0, limit).map(toChangeEvent);
+    const last = items[items.length - 1];
+    const page: ChangePage = {
+      items,
+      ...(decoded.length > limit && last !== undefined ? { nextAfter: last.seq } : {}),
+    };
+    return page;
   });
 
   const history = Effect.fn("EntityStore.history")(function* (
@@ -1151,6 +1481,7 @@ const makeEntityStore = Effect.gen(function* () {
       };
       return empty;
     }
+    cache.observe(first.type, first.incarnation);
     const version = options?.version ?? first.latest_version;
     yield* requireVersion(first.type, version, first.latest_version);
     const items: Array<Revision> = [];
@@ -1200,11 +1531,15 @@ const makeEntityStore = Effect.gen(function* () {
     for (const group of chunks([...ids])) {
       const rows = yield* all(
         sql(
-          `SELECT e.*, t.latest_version FROM entities e JOIN entity_types t ON t.name = e.type WHERE e.id IN (${placeholders(group)}) AND e.deleted = 0`,
+          `SELECT e.*, t.latest_version, t.incarnation FROM entities e JOIN entity_types t ON t.name = e.type WHERE e.id IN (${placeholders(group)}) AND e.deleted = 0`,
           ...group,
         ),
       );
-      for (const row of yield* decodeRows(EntityRow, "entity")(rows)) {
+      for (const row of yield* decodeRows(
+        Schema.Struct({ ...EntityRow.fields, incarnation: Schema.String }),
+        "entity",
+      )(rows)) {
+        cache.observe(row.type, row.incarnation);
         const presented = yield* Effect.result(present(row, row.latest_version));
         if (Result.isSuccess(presented)) {
           Object.defineProperty(included, row.id, {
@@ -1287,7 +1622,7 @@ const makeEntityStore = Effect.gen(function* () {
     type: string,
     input: CreateIndexInput,
   ) {
-    const summary = yield* registry.getType(type);
+    const { summary, incarnation } = yield* registry.typeState(type);
     yield* requireVersion(type, input.version, summary.latestVersion);
     const definition: IndexDefinition = {
       name: input.name,
@@ -1311,10 +1646,10 @@ const makeEntityStore = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     // Bumping indexes_rev makes every in-flight write re-read the definitions,
     // so no write can commit without maintaining the new index.
-    yield* db
+    const created = yield* db
       .batch([
         sql(
-          "INSERT INTO entity_indexes (type, name, generation, version, key, is_unique, state, cursor, error, created_at, updated_at) SELECT name, ?, indexes_rev + 1, ?, ?, ?, 'building', '', NULL, ?, ? FROM entity_types WHERE name = ?",
+          "INSERT INTO entity_indexes (type, name, generation, version, key, is_unique, state, cursor, error, created_at, updated_at) SELECT name, ?, indexes_rev + 1, ?, ?, ?, 'building', '', NULL, ?, ? FROM entity_types WHERE name = ? AND incarnation = ?",
           input.name,
           input.version,
           input.key,
@@ -1322,8 +1657,13 @@ const makeEntityStore = Effect.gen(function* () {
           now,
           now,
           type,
+          incarnation,
         ),
-        sql("UPDATE entity_types SET indexes_rev = indexes_rev + 1 WHERE name = ?", type),
+        sql(
+          "UPDATE entity_types SET indexes_rev = indexes_rev + 1 WHERE name = ? AND incarnation = ?",
+          type,
+          incarnation,
+        ),
       ])
       .pipe(
         Effect.mapError((error) =>
@@ -1332,6 +1672,10 @@ const makeEntityStore = Effect.gen(function* () {
             : storageFailure(error),
         ),
       );
+    if (created[0]?.changes !== 1) {
+      // The type was deleted (and maybe recreated) since it was read.
+      return yield* new TypeNotFound({ type });
+    }
     return yield* buildIndex(type, input.name, { steps: SYNC_BUILD_PAGES });
   });
 
@@ -1561,7 +1905,7 @@ const makeEntityStore = Effect.gen(function* () {
   ) {
     const [head] = yield* all(
       sql(
-        "SELECT t.latest_version, i.state FROM entity_types t LEFT JOIN entity_indexes i ON i.type = t.name AND i.name = ? WHERE t.name = ?",
+        "SELECT t.latest_version, t.incarnation, i.state FROM entity_types t LEFT JOIN entity_indexes i ON i.type = t.name AND i.name = ? WHERE t.name = ?",
         name,
         type,
       ),
@@ -1569,6 +1913,7 @@ const makeEntityStore = Effect.gen(function* () {
     if (head === undefined) {
       return yield* new TypeNotFound({ type });
     }
+    cache.observe(type, String(head["incarnation"]));
     const state = head["state"];
     if (state === null || state === undefined) {
       return yield* new IndexNotFound({ type, index: name });
@@ -1610,7 +1955,11 @@ const makeEntityStore = Effect.gen(function* () {
     list,
     replace,
     patch,
+    upsert,
     remove,
+    deleteType,
+    getChange,
+    listChanges,
     history,
     resolveLinks,
     backlinks,

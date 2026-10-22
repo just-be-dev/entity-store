@@ -3,6 +3,7 @@ import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import { errorBody } from "../entity/errors.ts";
 import type { StoreError } from "../entity/model.ts";
 
 export const json = (body: unknown, status = 200) =>
@@ -53,6 +54,16 @@ export class BadRequest extends Schema.TaggedError<BadRequest>()("BadRequest", {
 
 /** Read and decode a JSON body, enforcing the size cap. */
 export const body = <S extends Schema.Codec<any, unknown>>(schema: S) =>
+  Effect.flatMap(readBody(schema), (decoded) =>
+    decoded === undefined
+      ? Effect.fail(new BadRequest({ status: 400, message: "Expected a JSON body" }))
+      : Effect.succeed(decoded),
+  );
+
+/** Like {@link body}, but an empty body decodes to `undefined`. */
+export const optionalBody = <S extends Schema.Codec<any, unknown>>(schema: S) => readBody(schema);
+
+const readBody = <S extends Schema.Codec<any, unknown>>(schema: S) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const declared = Number(request.headers["content-length"] ?? "0");
@@ -62,6 +73,9 @@ export const body = <S extends Schema.Codec<any, unknown>>(schema: S) =>
     const text = yield* request.text.pipe(
       Effect.mapError(() => new BadRequest({ status: 400, message: "Couldn't read the body" })),
     );
+    if (text.trim() === "") {
+      return undefined;
+    }
     if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
       return yield* new BadRequest({ status: 413, message: "Request body is too large" });
     }
@@ -77,22 +91,27 @@ export const body = <S extends Schema.Codec<any, unknown>>(schema: S) =>
     if (Result.isFailure(decoded)) {
       return yield* new BadRequest({ status: 400, message: decoded.failure.message });
     }
-    return decoded.success as S["Type"];
+    return decoded.success as S["Type"] | undefined;
   });
 
 const searchParams = (url: string) => new URLSearchParams(url.split("?")[1] ?? "");
 
-/** An optional positive integer query parameter. */
-export const intParam = (name: string) =>
+/** An optional integer query parameter, at least `min` (default 1). */
+export const intParam = (name: string, options?: { readonly min?: number }) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const raw = searchParams(request.url).get(name);
     if (raw === null || raw === "") {
       return undefined;
     }
+    const min = options?.min ?? 1;
     const value = Number(raw);
-    if (!Number.isSafeInteger(value) || value < 1) {
-      return yield* new BadRequest({ status: 400, message: `${name} must be a positive integer` });
+    if (!Number.isSafeInteger(value) || value < min) {
+      return yield* new BadRequest({
+        status: 400,
+        message:
+          min === 1 ? `${name} must be a positive integer` : `${name} must be an integer ≥ ${min}`,
+      });
     }
     return value;
   });
@@ -124,9 +143,12 @@ const statusOf = (error: HttpError): number => {
     case "EntityNotFound":
     case "RevisionNotFound":
     case "IndexNotFound":
+    case "ChangeNotFound":
       return 404;
     case "TypeAlreadyExists":
+    case "TypeInUse":
     case "EntityAlreadyExists":
+    case "EntityTypeMismatch":
     case "VersionConflict":
     case "RevConflict":
     case "EntityLinked":
@@ -156,86 +178,17 @@ const messageOf = (error: HttpError): string => {
       return error.message;
     case "Unauthenticated":
       return "Sign in through Cloudflare Access to use this API";
-    case "TypeNotFound":
-      return `No entity type named '${error.type}'`;
-    case "TypeAlreadyExists":
-      return `Entity type '${error.type}' already exists`;
-    case "VersionNotFound":
-      return `${error.type} has no version ${error.version}`;
-    case "VersionConflict":
-      return `Another version of ${error.type} was added first; reload and try again`;
-    case "InvalidSchema":
-      return "The schema definition is invalid";
-    case "InvalidLens":
-      return "The lens definition is invalid";
-    case "LensCheckFailed":
-      return "The lens produced invalid documents; see report (or pass force: true)";
-    case "EntityNotFound":
-      return `No entity with id '${error.id}'`;
-    case "EntityDeleted":
-      return `Entity '${error.id}' was deleted at rev ${error.rev}`;
-    case "EntityAlreadyExists":
-      return `An entity with id '${error.id}' already exists`;
-    case "RevisionNotFound":
-      return `Entity '${error.id}' has no rev ${error.rev}`;
-    case "RevConflict":
-      return `Entity '${error.id}' is at rev ${error.currentRev}, not ${error.expectedRev}`;
-    case "ValidationFailed":
-      return `Data doesn't match ${error.type} v${error.version}: ${error.message}`;
-    case "ProjectionFailed":
-      return `Couldn't present ${error.type} v${error.from} data as v${error.to}: ${error.message}`;
-    case "LinkTargetInvalid":
-      return error.problems.length === 0
-        ? "A linked entity doesn't exist, was deleted, or has the wrong type"
-        : error.problems.map((p) => `${p.path}: ${p.message}`).join("; ");
-    case "EntityLinked":
-      return `Entity '${error.id}' is linked from other entities; remove those links first`;
-    case "InvalidIndex":
-      return "The index definition is invalid";
-    case "IndexAlreadyExists":
-      return `${error.type} already has an index named '${error.index}'`;
-    case "IndexNotFound":
-      return `${error.type} has no index named '${error.index}'`;
-    case "IndexNotReady":
-      return error.state === "failed"
-        ? `Index '${error.index}' failed to build; see the index for why, then drop and recreate it`
-        : `Index '${error.index}' is still building; try again shortly`;
-    case "IndexKeyFailed":
-      return `Couldn't compute index '${error.index}' for this ${error.type}: ${error.message}`;
-    case "UniqueViolation":
-      return error.conflicts.length === 0
-        ? "Another entity already has this unique index key"
-        : error.conflicts
-            .map((c) => `${c.index}: '${c.key}' is taken${c.id === undefined ? "" : ` by ${c.id}`}`)
-            .join("; ");
-    case "StorageFailure":
-      return "Storage error";
+    default:
+      return errorBody(error).message;
   }
 };
 
-const detailsOf = (error: HttpError): Record<string, unknown> => {
-  switch (error._tag) {
-    case "InvalidSchema":
-    case "InvalidLens":
-    case "InvalidIndex":
-      return { issues: error.issues };
-    case "IndexNotReady":
-      return { state: error.state };
-    case "UniqueViolation":
-      return { conflicts: error.conflicts };
-    case "LensCheckFailed":
-      return { report: error.report };
-    case "RevConflict":
-      return { currentRev: error.currentRev };
-    case "EntityDeleted":
-      return { rev: error.rev };
-    case "LinkTargetInvalid":
-      return { problems: error.problems };
-    case "EntityLinked":
-      return { linkedFrom: error.linkedFrom };
-    default:
-      return {};
+const bodyOf = (error: HttpError): Record<string, unknown> => {
+  if (error._tag === "BadRequest" || error._tag === "Unauthenticated") {
+    return { error: messageOf(error), code: error._tag };
   }
+  const { code, message, ...details } = errorBody(error);
+  return { error: message, code, ...details };
 };
 
 /** Map every expected failure to a JSON error response. */
@@ -249,10 +202,7 @@ export const respond = <E extends HttpError, R>(
           // Log the operation name only; storage messages can echo data.
           yield* Effect.logError("Storage failure");
         }
-        return json(
-          { error: messageOf(error), code: error._tag, ...detailsOf(error) },
-          statusOf(error),
-        );
+        return json(bodyOf(error), statusOf(error));
       }),
     ),
   );

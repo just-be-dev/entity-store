@@ -5,7 +5,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { StoreError } from "../entity/model.ts";
-import { EntityId, IndexName, Rev } from "../entity/model.ts";
+import { ChangeMeta, EntityId, IndexName, Rev } from "../entity/model.ts";
 import { EntityStore, SYNC_BUILD_PAGES } from "../entity/store.ts";
 import { compileLens } from "../lens/apply.ts";
 import { BUILTINS } from "../lens/expr.ts";
@@ -13,7 +13,16 @@ import { Direction, Lens } from "../lens/model.ts";
 import { checkDefinition, compile } from "../schema/compile.ts";
 import { EntitySchema, TypeName, Version } from "../schema/model.ts";
 import { requirePrincipal } from "./auth.ts";
-import { BadRequest, body, intParam, json, rawParam, respond, stringParam } from "./response.ts";
+import {
+  BadRequest,
+  body,
+  intParam,
+  json,
+  optionalBody,
+  rawParam,
+  respond,
+  stringParam,
+} from "./response.ts";
 
 const Note = Schema.String.check(Schema.isMaxLength(2000));
 
@@ -36,22 +45,40 @@ const AddVersionBody = Schema.Struct({
   force: Schema.optionalKey(Schema.Boolean),
 });
 
+// Writes name the version they speak, or omit it to write at the latest.
 const CreateEntityBody = Schema.Struct({
   id: Schema.optionalKey(EntityId),
-  version: Version,
+  version: Schema.optionalKey(Version),
   data: Schema.Json,
+  meta: Schema.optionalKey(ChangeMeta),
 });
 
 const ReplaceBody = Schema.Struct({
-  version: Version,
+  version: Schema.optionalKey(Version),
   data: Schema.Json,
   expectedRev: Schema.optionalKey(Rev),
+  meta: Schema.optionalKey(ChangeMeta),
 });
 
 const PatchBody = Schema.Struct({
-  version: Version,
+  version: Schema.optionalKey(Version),
   patch: Schema.Record(Schema.String, Schema.Json),
   expectedRev: Schema.optionalKey(Rev),
+  meta: Schema.optionalKey(ChangeMeta),
+});
+
+/** `expectedRev: 0` means the entity must not exist (or must be deleted). */
+const UpsertBody = Schema.Struct({
+  version: Schema.optionalKey(Version),
+  patch: Schema.Record(Schema.String, Schema.Json),
+  expectedRev: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  meta: Schema.optionalKey(ChangeMeta),
+});
+
+/** A delete's optional body; `?expectedRev` works too. */
+const DeleteBody = Schema.Struct({
+  expectedRev: Schema.optionalKey(Rev),
+  meta: Schema.optionalKey(ChangeMeta),
 });
 
 const CreateIndexBody = Schema.Struct({
@@ -144,6 +171,14 @@ export const entityRoutes = Layer.mergeAll(
     }),
   ),
   route(
+    "DELETE",
+    "/api/types/:type",
+    Effect.gen(function* () {
+      const store = yield* EntityStore;
+      return json(yield* store.deleteType(yield* pathParam("type")));
+    }),
+  ),
+  route(
     "POST",
     "/api/types/:type/versions/check",
     Effect.gen(function* () {
@@ -208,6 +243,16 @@ export const entityRoutes = Layer.mergeAll(
     }),
   ),
   route(
+    "PUT",
+    "/api/types/:type/entities/:id",
+    Effect.gen(function* () {
+      const input = yield* body(UpsertBody);
+      const store = yield* EntityStore;
+      const upserted = yield* store.upsert(yield* pathParam("type"), yield* pathParam("id"), input);
+      return json(upserted, upserted.created ? 201 : 200);
+    }),
+  ),
+  route(
     "GET",
     "/api/entities/:id",
     Effect.gen(function* () {
@@ -245,10 +290,12 @@ export const entityRoutes = Layer.mergeAll(
     "DELETE",
     "/api/entities/:id",
     Effect.gen(function* () {
+      const input = yield* optionalBody(DeleteBody);
       const store = yield* EntityStore;
       return json(
         yield* store.remove(yield* pathParam("id"), {
-          expectedRev: yield* intParam("expectedRev"),
+          expectedRev: input?.expectedRev ?? (yield* intParam("expectedRev")),
+          meta: input?.meta,
         }),
       );
     }),
@@ -275,6 +322,21 @@ export const entityRoutes = Layer.mergeAll(
         yield* store.history(yield* pathParam("id"), {
           version: yield* intParam("version"),
           before: yield* intParam("before"),
+          limit: yield* intParam("limit"),
+        }),
+      );
+    }),
+  ),
+
+  // ── Changes ──
+  route(
+    "GET",
+    "/api/changes",
+    Effect.gen(function* () {
+      const store = yield* EntityStore;
+      return json(
+        yield* store.listChanges({
+          after: yield* intParam("after", { min: 0 }),
           limit: yield* intParam("limit"),
         }),
       );
