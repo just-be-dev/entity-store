@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { AccessApp, AgentToken, isDev } from "./access.ts";
 import Api from "./api.ts";
+import { ChangesQueue } from "./queue.ts";
 
 /** An optional variable; blank counts as unset. */
 const optional = (name: string) =>
@@ -70,14 +71,19 @@ export default Alchemy.Stack(
   "entity-store",
   { providers: Cloudflare.providers(), state },
   Effect.gen(function* () {
-    yield* Api;
+    // Declared at the root so other stacks can reference it as "Changes"
+    // (see docs/api.md). The Api binds it as a producer.
+    const changes = yield* ChangesQueue;
+    const api = yield* Api;
     const app = yield* App;
     const url = Option.match(prodRoute, { onNone: () => app.url, onSome: ({ url }) => url });
+    // What a consumer stack needs: the Worker to bind for RPC and the queue to consume.
+    const consumer = { apiWorkerName: api.workerName, changesQueueName: changes.queueName };
     if (isDev) {
-      return { url };
+      return { url, ...consumer };
     }
     // The secret stays in state; read it with `alchemy state read`.
     const token = yield* AgentToken;
-    return { url, agentTokenClientId: token.clientId };
+    return { url, ...consumer, agentTokenClientId: token.clientId };
   }),
 );
