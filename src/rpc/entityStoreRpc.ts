@@ -79,6 +79,16 @@ const GetEntityOptions = Schema.Struct({
 
 const GetChangeOptions = Schema.Struct({ version: Schema.optionalKey(Version) });
 
+const CheckEntityInput = Schema.Struct({
+  version: Schema.optionalKey(Version),
+  patch: Schema.Record(Schema.String, Schema.Json),
+});
+
+const BacklinksOptions = Schema.Struct({
+  cursor: Schema.optionalKey(Schema.String),
+  limit: Schema.optionalKey(Limit),
+});
+
 const ListChangesOptions = Schema.Struct({
   after: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   limit: Schema.optionalKey(Limit),
@@ -261,6 +271,32 @@ export const entityStoreRpc = {
         const name = yield* decode(TypeName, "type name", type);
         const entityId = yield* decode(EntityId, "entity id", id);
         return yield* store.upsert(name, entityId, yield* decode(UpsertBody, "upsert", input));
+      }),
+    ),
+
+  /** A dry run of upsertEntity: same checks, nothing written, no change recorded. */
+  checkEntity: (type: unknown, id: unknown, input: unknown) =>
+    run(
+      "checkEntity",
+      Effect.gen(function* () {
+        const store = yield* EntityStore;
+        const name = yield* decode(TypeName, "type name", type);
+        const entityId = yield* decode(EntityId, "entity id", id);
+        return yield* store.checkUpsert(
+          name,
+          entityId,
+          yield* decode(CheckEntityInput, "check", input),
+        );
+      }),
+    ),
+
+  getBacklinks: (id: unknown, input?: unknown) =>
+    run(
+      "getBacklinks",
+      Effect.gen(function* () {
+        const store = yield* EntityStore;
+        const entityId = yield* decode(Schema.String, "entity id", id);
+        return yield* store.backlinks(entityId, yield* options(BacklinksOptions, input));
       }),
     ),
 

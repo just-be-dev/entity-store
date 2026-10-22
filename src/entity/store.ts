@@ -849,7 +849,11 @@ const makeEntityStore = Effect.gen(function* () {
       rev,
     );
 
-  /** Insert a new entity at rev 1. No retry: callers decide what a lost race means. */
+  /**
+   * Insert a new entity at rev 1. No retry: callers decide what a lost race
+   * means. A dry run makes every check a real insert would (except the
+   * batch's own race guards) and returns the entity it would write.
+   */
   const insertNew = (
     type: string,
     input: {
@@ -858,6 +862,7 @@ const makeEntityStore = Effect.gen(function* () {
       readonly data: unknown;
       readonly meta?: ChangeMeta | undefined;
     },
+    dryRun = false,
   ) =>
     Effect.gen(function* () {
       const { summary, indexesRev } = yield* registry.typeState(type);
@@ -870,6 +875,19 @@ const makeEntityStore = Effect.gen(function* () {
       const indexes = yield* loadIndexes(type, indexesRev);
       const entries = yield* indexWrites(type, id, indexes.items, undefined, { version, data });
       const now = yield* Clock.currentTimeMillis;
+      const entity: Entity = {
+        id: id as Entity["id"],
+        type,
+        version,
+        storedVersion: version,
+        rev: 1,
+        data,
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (dryRun) {
+        return entity;
+      }
       yield* db
         .batch([
           indexGuard(type, indexes.rev),
@@ -888,16 +906,6 @@ const makeEntityStore = Effect.gen(function* () {
           recordChange({ id, type, rev: 1, op: "create", meta: input.meta, at: now }),
         ])
         .pipe(Effect.mapError(writeError(type, id, () => new EntityAlreadyExists({ id }))));
-      const entity: Entity = {
-        id: id as Entity["id"],
-        type,
-        version,
-        storedVersion: version,
-        rev: 1,
-        data,
-        createdAt: now,
-        updatedAt: now,
-      };
       return entity;
     });
 
@@ -1045,6 +1053,7 @@ const makeEntityStore = Effect.gen(function* () {
     options: WriteOptions,
     op: Operation,
     change: (current: Json) => Json,
+    dryRun = false,
   ) =>
     Effect.gen(function* () {
       const id = row.id;
@@ -1098,6 +1107,19 @@ const makeEntityStore = Effect.gen(function* () {
       const createdAt = revive ? now : row.created_at;
       const nextRev = row.rev + 1;
       const json = JSON.stringify(stored);
+      const entity: Entity = {
+        id: id as Entity["id"],
+        type: row.type,
+        version: writer,
+        storedVersion,
+        rev: nextRev,
+        data: storedVersion === writer ? stored : after,
+        createdAt,
+        updatedAt: now,
+      };
+      if (dryRun) {
+        return entity;
+      }
       // The guard aborts the batch if index definitions changed since they were
       // read. Then the revision insert: revisions are contiguous, so its primary
       // key fails (aborting the whole batch) iff another write already moved
@@ -1156,16 +1178,6 @@ const makeEntityStore = Effect.gen(function* () {
           message: "Entity update matched no row after its revision was recorded",
         });
       }
-      const entity: Entity = {
-        id: id as Entity["id"],
-        type: row.type,
-        version: writer,
-        storedVersion,
-        rev: nextRev,
-        data: storedVersion === writer ? stored : after,
-        createdAt,
-        updatedAt: now,
-      };
       return entity;
     });
 
@@ -1250,16 +1262,18 @@ const makeEntityStore = Effect.gen(function* () {
    * `expectedRev: 0` means "must not exist or be deleted"; any other value
    * must match the live rev.
    */
-  const upsert = Effect.fn("EntityStore.upsert")(function* (
+  /** One upsert attempt, shared by {@link upsert} and its dry run {@link checkUpsert}. */
+  const upsertOnce = (
     type: string,
     id: string,
     options: WriteOptions & { readonly patch: unknown },
-  ) {
+    dryRun: boolean,
+  ) => {
     const changes = options.patch as Json;
     const expected = options.expectedRev;
     const conflict = (currentRev: number) =>
       new RevConflict({ id, expectedRev: expected ?? 0, currentRev });
-    const attempt = Effect.gen(function* () {
+    return Effect.gen(function* () {
       const found = yield* readRow(id).pipe(
         Effect.map(Option.some),
         Effect.catchTag("EntityNotFound", () => Effect.succeedNone),
@@ -1268,12 +1282,11 @@ const makeEntityStore = Effect.gen(function* () {
         if (expected !== undefined && expected !== 0) {
           return yield* conflict(0);
         }
-        const entity = yield* insertNew(type, {
-          id,
-          version: options.version,
-          data: mergePatch({}, changes),
-          meta: options.meta,
-        });
+        const entity = yield* insertNew(
+          type,
+          { id, version: options.version, data: mergePatch({}, changes), meta: options.meta },
+          dryRun,
+        );
         return { entity, created: true };
       }
       const row = found.value;
@@ -1285,17 +1298,35 @@ const makeEntityStore = Effect.gen(function* () {
         return yield* conflict(current);
       }
       if (current === 0) {
-        const entity = yield* writeRevision(row, options, "create", (empty) =>
-          mergePatch(empty, changes),
+        const entity = yield* writeRevision(
+          row,
+          options,
+          "create",
+          (empty) => mergePatch(empty, changes),
+          dryRun,
         );
         return { entity, created: true };
       }
-      const entity = yield* writeRevision(row, options, "patch", (data) =>
-        mergePatch(data, changes),
+      const entity = yield* writeRevision(
+        row,
+        options,
+        "patch",
+        (data) => mergePatch(data, changes),
+        dryRun,
       );
       return { entity, created: false };
     });
-    return yield* attempt.pipe(
+  };
+
+  const upsert = Effect.fn("EntityStore.upsert")(function* (
+    type: string,
+    id: string,
+    options: WriteOptions & { readonly patch: unknown },
+  ) {
+    const expected = options.expectedRev;
+    const conflict = (currentRev: number) =>
+      new RevConflict({ id, expectedRev: expected ?? 0, currentRev });
+    return yield* upsertOnce(type, id, options, false).pipe(
       // Another writer created the entity between our read and our insert.
       Effect.catchTag("EntityAlreadyExists", () =>
         Effect.gen(function* () {
@@ -1311,6 +1342,22 @@ const makeEntityStore = Effect.gen(function* () {
       retryLostRace(expected),
       retryOnIndexChange,
     );
+  });
+
+  /**
+   * A dry run of {@link upsert}: the same reads, merge, validation, link
+   * target and unique index checks, and EntityTypeMismatch, but nothing is
+   * written and no change is recorded. Returns the data the upsert would
+   * store, presented at the writer's version.
+   */
+  const checkUpsert = Effect.fn("EntityStore.checkUpsert")(function* (
+    type: string,
+    id: string,
+    options: { readonly version?: number | undefined; readonly patch: unknown },
+  ) {
+    // A dry run never reaches the batch guard; this only maps its error type.
+    const { entity, created } = yield* retryOnIndexChange(upsertOnce(type, id, options, true));
+    return { data: entity.data, version: entity.version, created };
   });
 
   const remove = Effect.fn("EntityStore.remove")(function* (
@@ -2015,6 +2062,7 @@ const makeEntityStore = Effect.gen(function* () {
     replace,
     patch,
     upsert,
+    checkUpsert,
     remove,
     deleteType,
     getChange,

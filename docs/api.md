@@ -223,11 +223,21 @@ writes do.
 | `replaceEntity(id, input)`      | `{ version?, data, expectedRev?, meta? }`    | `Entity`                               |
 | `patchEntity(id, input)`        | `{ version?, patch, expectedRev?, meta? }`   | `Entity`                               |
 | `upsertEntity(type, id, input)` | `{ version?, patch, expectedRev?, meta? }`   | `{ entity, created }`                  |
+| `checkEntity(type, id, input)`  | `{ version?, patch }`                        | `{ data, version, created }`           |
+| `getBacklinks(id, options?)`    | `{ cursor?, limit? }`                        | `BacklinkPage`                         |
 | `deleteEntity(id, options?)`    | `{ expectedRev?, meta? }`                    | `{ id, rev }`                          |
 | `getChange(id, rev, options?)`  | `{ version? }`                               | `Change`                               |
 | `listChanges(options?)`         | `{ after?, limit? }` (≤ 200)                 | `{ items: ChangeEvent[], nextAfter? }` |
 
-`EntityPage` is `{ items: Entity[], failures, nextCursor? }`, as over HTTP.
+`EntityPage` is `{ items: Entity[], failures, nextCursor? }`, and
+`BacklinkPage` is `{ items: Backlink[], nextCursor? }`, as over HTTP.
+
+`checkEntity` is a dry run of `upsertEntity`, through the same code: the same
+merge, schema validation, link target and unique index checks, and
+`EntityTypeMismatch`. It writes nothing and records no change. It returns the
+data the upsert would store, presented at the writer's `version`, and whether
+it would create the entity. The real write can still fail if something
+changes in between (another writer, a deleted link target, a key taken).
 
 ### Consuming from another Alchemy stack
 

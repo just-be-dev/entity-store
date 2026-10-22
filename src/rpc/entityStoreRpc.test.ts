@@ -74,6 +74,18 @@ describe("EntityStoreRpc", () => {
         [1, "create", { depth: 1 }],
         [2, "patch", null],
       ]);
+      expect(
+        yield* ok(rpc.checkEntity("person", "grace@example.com", { patch: { name: "Grace" } })),
+      ).toEqual({ data: { name: "Grace" }, version: 1, created: true });
+      expect(
+        yield* err(rpc.checkEntity("person", "ada@example.com", { patch: { name: 3 } })),
+      ).toMatchObject({ code: "ValidationFailed" });
+      expect(yield* ok(rpc.listChanges({ after: 2 }))).toEqual({ items: [] });
+      expect(yield* ok(rpc.getBacklinks("ada@example.com"))).toEqual({ items: [] });
+      expect(yield* err(rpc.getBacklinks("nobody"))).toMatchObject({ code: "EntityNotFound" });
+      expect((yield* err(rpc.getBacklinks("ada@example.com", { limit: 0 }))).code).toBe(
+        "BadRequest",
+      );
       expect(yield* ok(rpc.deleteEntity("ada@example.com", { expectedRev: 2 }))).toEqual({
         id: "ada@example.com",
         rev: 3,
