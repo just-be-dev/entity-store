@@ -7,6 +7,7 @@ import type * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { StoreError } from "../entity/model.ts";
 import {
   AddVersionBody,
+  CheckEntityBody,
   CheckVersionBody,
   CreateEntityBody,
   CreateTypeBody,
@@ -53,6 +54,18 @@ const pathParam = (name: string) =>
     // The router has already percent-decoded path parameters.
     return value;
   });
+
+/** The `:id` path parameter, which must be a valid entity id (it may be created). */
+const entityIdParam = Effect.gen(function* () {
+  const id = yield* pathParam("id");
+  if (!Schema.is(EntityId)(id)) {
+    return yield* new BadRequest({
+      status: 400,
+      message: "Entity ids use letters, digits, '_', '-', '.' or '@' (max 128), not only dots",
+    });
+  }
+  return id;
+});
 
 /** `?include=links` adds `included`: the linked entities, keyed by id. */
 const includeLinks = () =>
@@ -196,18 +209,22 @@ export const entityRoutes = Layer.mergeAll(
     }),
   ),
   route(
+    "POST",
+    "/api/types/:type/entities/:id/check",
+    Effect.gen(function* () {
+      const input = yield* body(CheckEntityBody);
+      const store = yield* EntityStore;
+      const id = yield* entityIdParam;
+      return json(yield* store.checkUpsert(yield* pathParam("type"), id, input));
+    }),
+  ),
+  route(
     "PUT",
     "/api/types/:type/entities/:id",
     Effect.gen(function* () {
       const input = yield* body(UpsertBody);
       const store = yield* EntityStore;
-      const id = yield* pathParam("id");
-      if (!Schema.is(EntityId)(id)) {
-        return yield* new BadRequest({
-          status: 400,
-          message: "Entity ids use letters, digits, '_', '-', '.' or '@' (max 128)",
-        });
-      }
+      const id = yield* entityIdParam;
       const upserted = yield* store.upsert(yield* pathParam("type"), id, input);
       return json(upserted, upserted.created ? 201 : 200);
     }),

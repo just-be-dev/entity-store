@@ -6,6 +6,7 @@ import { Identity } from "../auth/identity.ts";
 import { errorBody } from "../entity/errors.ts";
 import {
   AddVersionBody,
+  CheckEntityBody,
   CheckVersionBody,
   CreateEntityBody,
   CreateTypeBody,
@@ -78,11 +79,6 @@ const GetEntityOptions = Schema.Struct({
 });
 
 const GetChangeOptions = Schema.Struct({ version: Schema.optionalKey(Version) });
-
-const CheckEntityInput = Schema.Struct({
-  version: Schema.optionalKey(Version),
-  patch: Schema.Record(Schema.String, Schema.Json),
-});
 
 const BacklinksOptions = Schema.Struct({
   cursor: Schema.optionalKey(Schema.String),
@@ -285,7 +281,7 @@ export const entityStoreRpc = {
         return yield* store.checkUpsert(
           name,
           entityId,
-          yield* decode(CheckEntityInput, "check", input),
+          yield* decode(CheckEntityBody, "check", input),
         );
       }),
     ),

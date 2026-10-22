@@ -61,3 +61,9 @@ export const DeleteBody = Schema.Struct({
   expectedRev: Schema.optionalKey(Rev),
   meta: Schema.optionalKey(ChangeMeta),
 });
+
+/** A dry run of an upsert: the same body without `expectedRev` or `meta`. */
+export const CheckEntityBody = Schema.Struct({
+  version: Schema.optionalKey(Version),
+  patch: Schema.Record(Schema.String, Schema.Json),
+});

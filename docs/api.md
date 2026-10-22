@@ -67,18 +67,19 @@ type LensReport = {
 
 ## Entities
 
-| Method & path                       | Body / query                                 | Returns                                                  |
-| ----------------------------------- | -------------------------------------------- | -------------------------------------------------------- |
-| `GET /api/types/:type/entities`     | `?version&cursor&limit` (≤ 200),             | `{ items: Entity[], failures, nextCursor? }`             |
-|                                     | `&index&eq` to look up by key                |                                                          |
-| `POST /api/types/:type/entities`    | `{ id?, version?, data, meta? }`             | `201 Entity`                                             |
-| `PUT /api/types/:type/entities/:id` | `{ version?, patch, expectedRev?, meta? }`   | `{ entity: Entity, created }` (`201` if created)         |
-| `GET /api/entities/:id`             | `?version&rev`                               | `Entity`                                                 |
-| `PUT /api/entities/:id`             | `{ version?, data, expectedRev?, meta? }`    | `Entity` (presented at `version`)                        |
-| `PATCH /api/entities/:id`           | `{ version?, patch, expectedRev?, meta? }`   | `Entity` (RFC 7386 merge patch, `null` deletes)          |
-| `DELETE /api/entities/:id`          | `?expectedRev`, or `{ expectedRev?, meta? }` | `{ id, rev }`                                            |
-| `GET /api/entities/:id/backlinks`   | `?cursor&limit`                              | `{ items: Backlink[], nextCursor? }`                     |
-| `GET /api/entities/:id/history`     | `?version&before&limit`                      | `{ id, type, items: Revision[], failures, nextBefore? }` |
+| Method & path                              | Body / query                                 | Returns                                                  |
+| ------------------------------------------ | -------------------------------------------- | -------------------------------------------------------- |
+| `GET /api/types/:type/entities`            | `?version&cursor&limit` (≤ 200),             | `{ items: Entity[], failures, nextCursor? }`             |
+|                                            | `&index&eq` to look up by key                |                                                          |
+| `POST /api/types/:type/entities`           | `{ id?, version?, data, meta? }`             | `201 Entity`                                             |
+| `PUT /api/types/:type/entities/:id`        | `{ version?, patch, expectedRev?, meta? }`   | `{ entity: Entity, created }` (`201` if created)         |
+| `POST /api/types/:type/entities/:id/check` | `{ version?, patch }`                        | `{ data, version, created }` (dry run, writes nothing)   |
+| `GET /api/entities/:id`                    | `?version&rev`                               | `Entity`                                                 |
+| `PUT /api/entities/:id`                    | `{ version?, data, expectedRev?, meta? }`    | `Entity` (presented at `version`)                        |
+| `PATCH /api/entities/:id`                  | `{ version?, patch, expectedRev?, meta? }`   | `Entity` (RFC 7386 merge patch, `null` deletes)          |
+| `DELETE /api/entities/:id`                 | `?expectedRev`, or `{ expectedRev?, meta? }` | `{ id, rev }`                                            |
+| `GET /api/entities/:id/backlinks`          | `?cursor&limit`                              | `{ items: Backlink[], nextCursor? }`                     |
+| `GET /api/entities/:id/history`            | `?version&before&limit`                      | `{ id, type, items: Revision[], failures, nextBefore? }` |
 
 ```ts
 type Entity = { id; type; version; storedVersion; rev; data; createdAt; updatedAt };
@@ -134,6 +135,12 @@ type Revision = {
   rev (`op: "create"`). Returns `created: true`.
 - **Entity of another type, live or deleted:** `409 EntityTypeMismatch`
   (`{ id, type, actual }`).
+
+`POST /api/types/:type/entities/:id/check` is a dry run of the same upsert
+(see `checkEntity` under [RPC](#rpc-over-a-service-binding)): the same checks
+and error codes, but nothing is written and no change is recorded. It returns
+`{ data, version, created }`: the data the upsert would store, the version
+it's presented in, and whether it would create the entity.
 
 `expectedRev: 0` means "must be missing or deleted". Any other value must
 match the live rev. Either way a mismatch is `409 RevConflict`, with

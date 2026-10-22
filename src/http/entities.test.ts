@@ -471,4 +471,50 @@ describe("entity HTTP API", () => {
       expect((yield* call("DELETE", "/api/types/person")).status).toBe(404);
     }),
   );
+
+  it.effect("dry-runs an upsert without writing", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      yield* call("POST", "/api/types", {
+        name: "note",
+        schema: { fields: { text: { type: "string" } } },
+      });
+      const path = `/api/types/person/entities/${encodeURIComponent("ada@example.com")}/check`;
+
+      const created = yield* call("POST", path, { patch: { name: "Ada", email: "a@b.co" } });
+      expect(created.status).toBe(200);
+      expect(created.body).toEqual({
+        data: { name: "Ada", email: "a@b.co" },
+        version: 1,
+        created: true,
+      });
+      expect((yield* call("GET", "/api/entities/ada%40example.com")).status).toBe(404);
+      expect((yield* call("GET", "/api/changes")).body.items).toEqual([]);
+
+      yield* call("PUT", "/api/types/person/entities/ada%40example.com", {
+        patch: { name: "Ada", email: "a@b.co" },
+      });
+      const patched = yield* call("POST", path, { patch: { name: "Ada L." } });
+      expect(patched.body).toEqual({
+        data: { name: "Ada L.", email: "a@b.co" },
+        version: 1,
+        created: false,
+      });
+      expect((yield* call("GET", "/api/entities/ada%40example.com")).body.rev).toBe(1);
+
+      const invalid = yield* call("POST", path, { patch: { email: "nope" } });
+      expect(invalid.status).toBe(422);
+      expect(invalid.body.code).toBe("ValidationFailed");
+      const mismatch = yield* call("POST", "/api/types/note/entities/ada%40example.com/check", {
+        patch: { text: "x" },
+      });
+      expect(mismatch.status).toBe(409);
+      expect(mismatch.body).toMatchObject({ code: "EntityTypeMismatch", actual: "person" });
+      expect(
+        (yield* call("POST", "/api/types/person/entities/a%20b/check", { patch: {} })).status,
+      ).toBe(400);
+      expect((yield* call("POST", path, { patch: [] })).status).toBe(400);
+    }),
+  );
 });
