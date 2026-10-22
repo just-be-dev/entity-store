@@ -78,7 +78,10 @@ whose update matches nothing lost a race to another flusher and stops. The
 cursor never moves backwards. The API flushes after every successful write
 (up to 5 batches, in `waitUntil`) and on its minutely cron (up to 50), so a
 write's change is delivered within about a minute even if its own flush
-failed. Delivery is at least once and unordered.
+failed. Write-triggered flushes are single-flight per isolate: a write while
+one runs makes it loop once more instead of starting another that would
+resend the same changes. Delivery is at least once and unordered; consumers
+dedupe by `seq`.
 
 Change rows are kept: `getChange` and `listChanges` read them, and there's
 no retention yet.
@@ -108,6 +111,11 @@ latest schema links to it (older versions don't count). Both conditions are
 re-checked inside the delete batch: the type row is deleted only if they
 still hold, and everything else only if the type row is gone. So an entity
 created concurrently is never lost.
+
+Schema writes (`createType`, `addVersion`) re-check inside their batch that
+every type they link to still exists, so a `deleteType` that commits between
+the check and the write fails it with `InvalidSchema` rather than leaving a
+link to a missing type.
 
 A type can be created again under the same name. Each creation gets a random
 `incarnation`, and isolates key cached schema versions by it, so they never

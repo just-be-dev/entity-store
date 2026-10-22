@@ -106,7 +106,11 @@ type Revision = {
   `getChange`. The store doesn't interpret it.
 - `storedVersion` is the version the data is physically stored at.
 - Without `expectedRev`, writes retry on a lost race against a fresh read. With
-  it, a stale revision fails with `409 RevConflict` and `currentRev`.
+  it, a stale revision fails with `409 RevConflict` and `currentRev`, the
+  entity's live rev when the conflict was found (`0` if it's missing or
+  deleted).
+- Deleting a deleted entity succeeds and returns its delete rev, unless
+  `expectedRev` is given: then it's `409 RevConflict` with `currentRev: 0`.
 - `include=links` adds `included: { [id]: Entity }` with every entity the
   returned data links to, each at its type's latest version.
 - `Backlink = { source, type, path }`: an entity linking here and the field
@@ -169,8 +173,10 @@ on the API's minutely cron. It advances the cursor only after a send
 succeeds, so a failure delays delivery but never skips a change.
 
 - **At least once.** Two flushers can send the same batch, and a retried
-  batch can arrive after later ones. Dedupe by `(id, rev)`, and don't rely
-  on order.
+  batch can arrive after later ones. Dedupe by `seq`, which is unique per
+  change and never reused. Don't dedupe by `(id, rev)`: deleting a type purges
+  its deleted entities, so their ids can be created again and repeat
+  `(id, rev)` pairs. Don't rely on order.
 - **Payloads aren't in the message.** Read them with `getChange(id, rev)`,
   which lenses `before` and `after` to any version. A change whose type was
   deleted since, or written before the change feed existed, is

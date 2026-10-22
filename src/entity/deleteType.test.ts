@@ -160,4 +160,43 @@ describe("deleteType", () => {
       expect((yield* store.get("late")).data).toEqual({ text: "x" });
     }).pipe(Effect.provide(layer));
   });
+
+  it.effect("a schema write fails if a type it links to is deleted before its batch", () => {
+    let interleave: (() => void) | undefined;
+    const { sqlite, layer } = setup({
+      beforeBatch: () => {
+        const run = interleave;
+        interleave = undefined;
+        run?.();
+      },
+    });
+    const deleteAuthor = () =>
+      sqlite.database.exec(
+        "DELETE FROM schema_versions WHERE type = 'author'; DELETE FROM entity_types WHERE name = 'author'",
+      );
+    return Effect.gen(function* () {
+      const store = yield* EntityStore;
+      yield* store.createType({ name: "author", schema: { fields: { name: { type: "string" } } } });
+      interleave = deleteAuthor;
+      expect(yield* Effect.flip(store.createType({ name: "post", schema: Post }))).toMatchObject({
+        _tag: "InvalidSchema",
+        issues: [{ message: "Links point at 'author', which isn't an entity type" }],
+      });
+      expect(count(sqlite, "entity_types")).toBe(0);
+      expect(count(sqlite, "schema_versions")).toBe(0);
+
+      yield* store.createType({ name: "author", schema: { fields: { name: { type: "string" } } } });
+      yield* store.createType({ name: "post", schema: { fields: { title: { type: "string" } } } });
+      interleave = deleteAuthor;
+      const added = yield* Effect.flip(
+        store.addVersion("post", {
+          schema: Post,
+          lens: { ops: [{ op: "add", field: "author", default: null }] },
+        }),
+      );
+      expect(added._tag).toBe("InvalidSchema");
+      expect((yield* store.getType("post")).latestVersion).toBe(1);
+      expect(count(sqlite, "schema_versions")).toBe(1);
+    }).pipe(Effect.provide(layer));
+  });
 });

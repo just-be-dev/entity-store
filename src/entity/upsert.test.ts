@@ -228,4 +228,82 @@ describe("upsert", () => {
         ).toBe("ValidationFailed");
       }).pipe(Effect.provide(setup().layer)),
   );
+
+  it.live("a write that loses a batch race reports the entity's real rev", () => {
+    let interleave: (() => void) | undefined;
+    const { sqlite, layer } = setup({
+      beforeBatch: () => {
+        const run = interleave;
+        interleave = undefined;
+        run?.();
+      },
+    });
+    /** Another writer commits `revs` more revisions, the last optionally a delete. */
+    const otherWrites = (id: string, revs: number, deleted: boolean) => () => {
+      for (let i = 0; i < revs; i++) {
+        const last = i === revs - 1;
+        sqlite.database
+          .prepare("UPDATE entities SET rev = rev + 1, deleted = ? WHERE id = ?")
+          .run(last && deleted ? 1 : 0, id);
+        sqlite.database
+          .prepare(
+            "INSERT INTO entity_revisions SELECT id, rev, version, 1, ?, data, updated_at FROM entities WHERE id = ?",
+          )
+          .run(last && deleted ? "delete" : "patch", id);
+      }
+    };
+    return Effect.gen(function* () {
+      const store = yield* withTypes;
+      yield* store.upsert("person", "ada", { patch: { name: "Ada" } });
+      interleave = otherWrites("ada", 2, false);
+      expect(
+        yield* Effect.flip(store.patch("ada", { expectedRev: 1, patch: { name: "B" } })),
+      ).toMatchObject({ _tag: "RevConflict", expectedRev: 1, currentRev: 3 });
+
+      interleave = otherWrites("ada", 1, true);
+      expect(
+        yield* Effect.flip(store.upsert("person", "ada", { expectedRev: 3, patch: { name: "C" } })),
+      ).toMatchObject({ _tag: "RevConflict", expectedRev: 3, currentRev: 0 });
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.live(
+    "an expectedRev: 0 upsert that loses its create to another type reports the mismatch",
+    () => {
+      let interleave: (() => void) | undefined;
+      const { sqlite, layer } = setup({
+        beforeBatch: () => {
+          const run = interleave;
+          interleave = undefined;
+          run?.();
+        },
+      });
+      return Effect.gen(function* () {
+        const store = yield* withTypes;
+        interleave = () =>
+          sqlite.database
+            .prepare(
+              "INSERT INTO entities (id, type, version, rev, data, deleted, created_at, updated_at) VALUES ('x', 'note', 1, 1, '{\"text\":\"n\"}', 0, 0, 0)",
+            )
+            .run();
+        expect(
+          yield* Effect.flip(store.upsert("person", "x", { expectedRev: 0, patch: { name: "A" } })),
+        ).toMatchObject({ _tag: "EntityTypeMismatch", id: "x", type: "person", actual: "note" });
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  it.effect("deleting a deleted entity succeeds, unless it expected a live rev", () =>
+    Effect.gen(function* () {
+      const store = yield* withTypes;
+      yield* store.upsert("person", "ada", { patch: { name: "Ada" } });
+      expect(yield* store.remove("ada", { expectedRev: 1 })).toEqual({ id: "ada", rev: 2 });
+      expect(yield* store.remove("ada")).toEqual({ id: "ada", rev: 2 });
+      expect(yield* Effect.flip(store.remove("ada", { expectedRev: 2 }))).toMatchObject({
+        _tag: "RevConflict",
+        expectedRev: 2,
+        currentRev: 0,
+      });
+    }).pipe(Effect.provide(setup().layer)),
+  );
 });
