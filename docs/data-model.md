@@ -3,7 +3,8 @@
 ## Storage layout (D1)
 
 Four core tables, defined in `migrations/0001_entity_store.sql`. Links
-(`0002`) and secondary indexes (`0003`) add their own, described below.
+(`0002`), secondary indexes (`0003`), and the change feed (`0004`) add their
+own, described below.
 
 | Table              | Key                | Holds                                                                    |
 | ------------------ | ------------------ | ------------------------------------------------------------------------ |
@@ -22,8 +23,10 @@ Cost per operation, in D1 rows:
 | Operation               | Round trips      | Rows read             | Rows written                           |
 | ----------------------- | ---------------- | --------------------- | -------------------------------------- |
 | read entity             | 1                | 2 (entity + its type) | 0                                      |
-| create                  | 1 batch          | 2                     | 3 (entity, type index entry, revision) |
-| update / patch / delete | 1 read + 1 batch | 4                     | 2 (entity, revision)                   |
+| create                  | 1 batch          | 2                     | 5 (entity, type index entry, revision, |
+|                         |                  |                       | change, change index entry)            |
+| update / patch / delete | 1 read + 1 batch | 4                     | 4 (entity, revision, change, change    |
+|                         |                  |                       | index entry)                           |
 | history page            | 1                | n + 2                 | 0                                      |
 
 The batch is a D1 transaction. The revision row is copied from the entity row
@@ -36,6 +39,82 @@ Schema versions are immutable, so each Worker isolate caches compiled schemas
 and lenses after first use; steady-state reads cost no extra queries for
 schemas. Every write batch also reads its type's row once, through
 `index_guard` (see [Indexes](#indexes)).
+
+## Entity ids and titles
+
+Entity ids match `^[A-Za-z0-9_.@-]{1,128}$`, so an email address can be an
+id. Ids are global across types, and `link` fields hold them.
+
+A schema's root may name a `title`: a top-level field of type `string` or
+`nullable` of `string` that is the entity's display name. The UI shows it
+where it shows entities. It doesn't change what data is valid.
+
+```json
+{ "title": "name", "fields": { "name": { "type": "string" } } }
+```
+
+## Change feed
+
+`entity_changes` (`0004`) holds one row per committed write: `seq`
+(autoincrement), `entity_id`, `type`, `rev`, `op`, the writer's `meta`, and
+`created_at`. The row is inserted in the same batch as the write's revision,
+so a change is recorded if and only if the write commits. Writes the store
+refuses, or deletes of already-deleted entities, record nothing.
+
+D1 runs one write transaction at a time, so `seq` order is commit order. A
+change never commits with a lower `seq` than one already committed, and a
+reader that has seen everything up to some `seq` won't miss a later commit
+below it.
+
+Delivery to the `Changes` queue uses a cursor in `change_delivery`
+(`name = 'queue'`, `after_seq`):
+
+1. Read up to 100 changes after the cursor, in the same query as the cursor.
+2. `sendBatch` them.
+3. `UPDATE change_delivery SET after_seq = <last seq> WHERE after_seq = <cursor read>`.
+
+A failed send leaves the cursor alone, so the next flush resends. A flusher
+whose update matches nothing lost a race to another flusher and stops. The
+cursor never moves backwards. The API flushes after every successful write
+(up to 5 batches, in `waitUntil`) and on its minutely cron (up to 50), so a
+write's change is delivered within about a minute even if its own flush
+failed. Delivery is at least once and unordered.
+
+Change rows are kept: `getChange` and `listChanges` read them, and there's
+no retention yet.
+
+## Upserts
+
+`upsert(type, id, { patch, expectedRev?, version?, meta? })` is the write
+for callers that don't know whether an entity exists:
+
+| The id is…                 | Result                                                      |
+| -------------------------- | ----------------------------------------------------------- |
+| missing                    | created from `patch` with `null` members dropped (`create`) |
+| a live entity of `type`    | `patch` applied as an RFC 7386 merge patch (`patch`)        |
+| a deleted entity of `type` | recreated from `patch` alone at the next rev (`create`)     |
+| an entity of another type  | `EntityTypeMismatch`                                        |
+
+A recreated entity keeps its history and gets a new `createdAt`. Its old
+links and index keys were already removed by the delete. `expectedRev: 0`
+means "missing or deleted"; any other value must equal the live rev.
+
+## Deleting types
+
+`deleteType(name)` removes a type, its schema versions, indexes and index
+entries, its deleted entities, and their revisions and changes. It's refused
+(`TypeInUse`) while the type has live entities, or while another type's
+latest schema links to it (older versions don't count). Both conditions are
+re-checked inside the delete batch: the type row is deleted only if they
+still hold, and everything else only if the type row is gone. So an entity
+created concurrently is never lost.
+
+A type can be created again under the same name. Each creation gets a random
+`incarnation`, and isolates key cached schema versions by it, so they never
+mix up the deleted type's versions with the new one's. A new type also
+starts at a random `indexes_rev`, so a write or backfill still holding the
+old type's rev (or an index generation derived from it) fails its guard
+instead of matching.
 
 ## Links between entities
 
@@ -261,7 +340,8 @@ Data is stored at the version it was last written in. Reads lens it to the
 requested version (latest by default) and validate the result; a failure is a
 `ProjectionFailed` error for that entity, and lists report it per item.
 
-Writers always name their version. A write is validated against the writer's
+Writers name the version they speak, or omit it to write at the type's
+latest version as of the write. A write is validated against the writer's
 schema and then:
 
 - **Writer at or above the stored version:** stored at the writer's version.

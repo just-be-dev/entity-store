@@ -26,6 +26,11 @@ import { TypeName, Version } from "../schema/model.ts";
  * never throws for domain errors. It returns a {@link RpcResult} whose
  * error `code` is the same string the HTTP API uses. Unexpected failures
  * come back as `StorageFailure`.
+ *
+ * The API Worker serves these on its default entrypoint. Alchemy's Effect
+ * Workers (2.0.0-beta.83) only export the default entrypoint, Durable
+ * Objects, and Workflows from the bundle, so a named `EntityStoreRpc`
+ * WorkerEntrypoint class would be dropped.
  */
 
 export type RpcResult<A> =

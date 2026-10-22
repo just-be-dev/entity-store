@@ -12,9 +12,10 @@ An entity store on Cloudflare D1 where schemas and the lenses between schema ver
 
 ## Entity store invariants
 
-- Schema versions are immutable and append-only. `entity_types.latest_version` only moves forward, and version N+1 always carries a lens from N. Isolates cache compiled versions forever; never update a `schema_versions` row in place.
-- Writers always name the schema version they speak. Never default a write's version to "latest".
-- Every write to `entities` appends exactly one `entity_revisions` row in the same D1 batch, copied from the new head row, and is conditional on the `rev` that was read. Keep both statements in one batch.
+- Schema versions are immutable and append-only while their type exists. `entity_types.latest_version` only moves forward, and version N+1 always carries a lens from N. Isolates cache compiled versions per type `incarnation`; never update a `schema_versions` row in place. Only `deleteType` removes versions, and a type created again gets a new incarnation and a random starting `indexes_rev`.
+- Writers name the schema version they speak, or omit it to write at the latest version as of the write. Never replace a version a writer named.
+- Every write to `entities` appends exactly one `entity_revisions` row and exactly one `entity_changes` row in the same D1 batch, and is conditional on the `rev` that was read. Keep all three in one batch. A write the store refuses records no change.
+- Change delivery is at least once: advance `change_delivery` only after the queue accepted the batch, and only with a conditional update on the cursor that was read.
 - `entity_links` mirrors the `link` fields of each entity's stored data. Change it only in the same batch as the entity write, and keep the 0002 triggers: they are what makes link targets and delete restriction hold under concurrent writes.
 - `index_entries` holds each entity's keys in the type's indexes. Change it only in the same batch as the entity write. Every entity write batch starts with the `index_guard` insert at the `indexes_rev` its index definitions were read at. Anything that changes which indexes writers maintain (create, fail, drop) bumps `entity_types.indexes_rev` in the same batch.
 - An index is pinned to one schema version, and its keys are computed from data lensed to that version. Never re-key an existing index in place; define a new one and drop the old one.

@@ -12,14 +12,22 @@ Website (Cloudflare.Website.Foldkit) ── static assets
           │ /api/*, runWorkerFirst
           ▼
 edge.ts ── service binding ── Api Worker ◀── direct client (workers.dev)
-                                   │
+                                   │  ▲
+                                   │  └── RPC from other stacks' Workers (service binding)
                                    ├── domain services
-                                   └── D1 / Durable Objects / AI, when added
+                                   ├── D1 (EntityDb)
+                                   └── Changes queue ──▶ consumer in another stack
 ```
 
 The Website is a `Cloudflare.Website.Foldkit` with `env: { API: Api }` and `assets.runWorkerFirst: ["/api/*"]`. The API is a `Cloudflare.Worker` that keeps Alchemy's default `workersDev: true`, which gives it a stable workers.dev URL and per-version preview URLs. `edge.ts` gets its env type from `Cloudflare.InferEnv<typeof App>` and only forwards requests to the binding. Routing and business logic live in the API.
 
 Both Workers are behind Cloudflare Access when deployed (`access.ts`). The API checks identity on every request, since requests can arrive directly or through the Website.
+
+The API binds the `Changes` queue (`src/platform/cloudflare/queue.ts`,
+named `entity-store-<stage>-changes`) as a producer, and returns the
+`EntityStoreRpc` methods next to `fetch`. Both are declared for other stacks
+to use (see [API](api.md#consuming-from-another-alchemy-stack)). The stack
+outputs `apiWorkerName` and `changesQueueName`.
 
 Both Workers use compatibility date `2026-10-04`. When you move it, test the new date rather than relying on Cloudflare's default.
 
@@ -75,6 +83,10 @@ The API turns each request's verified principal into the request-scoped `Identit
   - issuer pinned to the account's team domain (looked up at plan time and bound as `ACCESS_TEAM_DOMAIN`);
   - audience pinned to the Access application's AUD, bound as `ACCESS_AUD`;
   - expiry enforced.
+- **RPC over a service binding:** RPC methods can't be called over HTTP, so
+  only a Worker holding a binding to the API reaches them. Each call acts as
+  `{ _tag: "ServiceBinding", name: "rpc" }`. Don't bind the API into Workers
+  that shouldn't have full access.
 - **Anything else is unauthenticated.**
 
 Every route except `/api/health` requires a principal (`src/http/auth.ts`) and answers `401` without one.

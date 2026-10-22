@@ -9,7 +9,9 @@ A schema-versioned entity store on Cloudflare D1, built with Effect 4, Foldkit, 
 - **Checked lenses.** Before a version is saved, its lens is property-checked against random documents of both schemas and against stored data, with counterexamples shown in the UI.
 - **Links between entities.** A `link` field points at another entity of a given type. Writes check that targets exist, deletes are refused while something links to an entity, and reads can include linked entities or list backlinks.
 - **Secondary indexes.** An index is a key expression pinned to one schema version, such as `lower(email)` at v1, optionally unique. Lookups are one index seek. New schema versions never invalidate an index, because keys are computed at the pinned version. Indexes are defined on each type's Indexes page, and the type page can find entities by key.
-- **History on every write.** Each write appends a snapshot revision in the same D1 transaction, for 2 rows written per edit, with optimistic concurrency on `rev`.
+- **History on every write.** Each write appends a snapshot revision in the same D1 transaction, with optimistic concurrency on `rev`.
+- **Change events.** Each write also records a change in the same transaction, delivered at least once to a Cloudflare Queue for other apps to react to. `getChange` returns the data before and after, lensed to any version.
+- **RPC for other Workers.** The API Worker serves every operation as RPC methods over a service binding, returning `{ ok, value | error }` results instead of throwing.
 
 ```sh
 mise trust && mise install
@@ -50,24 +52,28 @@ The version is saved only if the lens check passes. Had v1 required `minLength: 
 ```text
 migrations/                       D1 tables: entity_types, schema_versions, entities,
                                   entity_revisions (0001); entity_links + triggers (0002);
-                                  entity_indexes, index_entries, index_guard (0003)
+                                  entity_indexes, index_entries, index_guard (0003);
+                                  entity_changes, change_delivery (0004)
 src/
   schema/                         schema-as-data model and compiler to Effect Schema
   lens/                           lens ops, expression language, lens property check
   entity/                         EntityStore application, SqlDatabase port, patch/diff
   http/                           routes, body limits, error mapping
+  rpc/                            RPC methods for service-binding callers
   api.ts                          route composition
   testing/                        node:sqlite SqlDatabase for tests
   platform/cloudflare/
     database.ts / d1.ts           D1 declaration and SqlDatabase adapter
     api.ts / stack.ts / edge.ts   API Worker, Alchemy stack, Website forwarding
+    queue.ts                      Changes queue and its producer adapter
   ui/                             Foldkit UI
 ```
 
 ## Not done yet
 
 - **All-or-nothing access.** Everyone Cloudflare Access lets in can do everything. There are no per-type or read-only permissions.
-- Deletes are soft (tombstone plus a `delete` revision). There's no restore or purge yet.
+- Entity deletes are soft (tombstone plus a `delete` revision). An upsert recreates a deleted entity. Only deleting its whole type purges one.
+- Change rows are kept forever; there's no retention yet.
 - Links only restrict deletes; there's no cascade or "unlink on delete" option yet.
 
 ## Deploying
