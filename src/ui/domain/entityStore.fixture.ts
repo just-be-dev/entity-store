@@ -53,6 +53,16 @@ export const personType: TypeInfo = {
   ],
 };
 
+/** `person` whose v2 schema names `fullName` as the entity title. */
+export const titledPersonType: TypeInfo = {
+  ...personType,
+  versions: personType.versions.map((version) =>
+    version.version === 2
+      ? { ...version, schema: { ...personV2Schema, title: "fullName" } }
+      : version,
+  ),
+};
+
 export const ada = (overrides: Partial<Entity> = {}): Entity => ({
   id: "ada",
   type: "person",

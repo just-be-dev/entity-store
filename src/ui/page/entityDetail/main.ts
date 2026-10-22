@@ -34,6 +34,7 @@ import {
 } from "@/domain/entityStore";
 import { parseJson, prettyJson } from "@/domain/json";
 import { type OutgoingLink, outgoingLinks } from "@/domain/links";
+import { entityTitle } from "@/domain/title";
 import { formatTime } from "@/lib/format";
 import { AppRoute, href } from "@/route";
 
@@ -1039,6 +1040,24 @@ const editView = (model: Model, latest: number, h: HtmlBuilder<Message>): Html =
     h,
   );
 
+/** The loaded entity's title, from the schema of the version it's shown in. */
+const displayTitle = (model: Model): Option.Option<string> =>
+  EntityState.match(model.entity, {
+    Loading: () => Option.none(),
+    Failed: () => Option.none(),
+    Loaded: ({ entity }) =>
+      TypeState.match(model.type, {
+        Idle: () => Option.none(),
+        Loading: () => Option.none(),
+        Failed: () => Option.none(),
+        Loaded: ({ info }) =>
+          Option.flatMap(
+            Array.findFirst(info.versions, (version) => version.version === entity.version),
+            (version) => entityTitle(version.schema, entity.data),
+          ),
+      }),
+  });
+
 export const view = Submodel.defineView<Model, Message>((model, h): Html =>
   h.div(
     [h.Class("space-y-6")],
@@ -1065,7 +1084,10 @@ export const view = Submodel.defineView<Model, Message>((model, h): Html =>
               ],
             }),
           ],
-          title: model.id,
+          ...Option.match(displayTitle(model), {
+            onNone: () => ({ title: model.id }),
+            onSome: (title) => ({ title, description: model.id }),
+          }),
           actions: Option.match(model.latestVersion, {
             onNone: () => [],
             onSome: (latest) => [

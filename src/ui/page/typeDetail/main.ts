@@ -34,6 +34,7 @@ import {
 import { compactJson, exampleDocument, parseJson, prettyJson } from "@/domain/json";
 import { readyIndexes } from "@/domain/indexes";
 import { linkedTypes, type OutgoingLink, outgoingLinks } from "@/domain/links";
+import { entityTitle } from "@/domain/title";
 import { entityLink, preview } from "@/components/links";
 import { formatTime, plural } from "@/lib/format";
 import { AppRoute, href } from "@/route";
@@ -675,6 +676,13 @@ const entityRow = (
       h.td(
         [h.Class("py-2 pr-4")],
         [
+          ...Option.match(
+            Option.flatMap(schema, (version) => entityTitle(version.schema, entity.data)),
+            {
+              onNone: () => [],
+              onSome: (title) => [h.div([h.Class("text-sm font-medium")], [title])],
+            },
+          ),
           h.a(
             [
               h.Href(href(AppRoute.EntityDetail({ id: entity.id }))),

@@ -1,8 +1,9 @@
+import * as Effect from "effect/Effect";
 import { pipe } from "effect/Function";
 import * as Schema from "effect/Schema";
 import * as String from "effect/String";
 import * as Route from "foldkit/route";
-import { defineRouteUnion, literal, slash, string } from "foldkit/route";
+import { defineRouteUnion, literal, param, slash, string } from "foldkit/route";
 import { modifyFields } from "foldkit/struct";
 import type { Url } from "foldkit/url";
 
@@ -39,9 +40,28 @@ export const typeIndexesRouter = pipe(
   Route.mapTo(AppRoute.TypeIndexes),
 );
 
+const decodeSegment = (segment: string): string => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+};
+
+/**
+ * An entity id segment. Ids may hold `@` and `.`, and links from other
+ * apps encode them (`ada%40example.com`), so the segment is decoded on
+ * parse and encoded on print.
+ */
+const entityIdParam = param(
+  "entity id",
+  (segment) => Effect.succeed({ id: decodeSegment(segment) }),
+  (value: { readonly id: string }) => encodeURIComponent(value.id),
+);
+
 export const entityDetailRouter = pipe(
   literal("entities"),
-  slash(string("id")),
+  slash(entityIdParam),
   Route.mapTo(AppRoute.EntityDetail),
 );
 

@@ -22,6 +22,11 @@ describe("routes", () => {
       AppRoute.TypeIndexes({ name: "person" }),
     );
     expect(urlToAppRoute(url("/entities/ada"))).toEqual(AppRoute.EntityDetail({ id: "ada" }));
+    // Encoded or not, an id with `@` reads the same.
+    for (const path of ["/entities/ada%40example.com", "/entities/ada@example.com"]) {
+      expect(urlToAppRoute(url(path))).toEqual(AppRoute.EntityDetail({ id: "ada@example.com" }));
+    }
+    expect(urlToAppRoute(url("/entities/100%"))).toEqual(AppRoute.EntityDetail({ id: "100%" }));
     expect(urlToAppRoute(url("/nope/x"))._tag).toBe("NotFound");
   });
 
