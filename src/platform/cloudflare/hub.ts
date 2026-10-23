@@ -4,28 +4,21 @@
  * Worker forwards `/_hub/*` to agents' `Embed` Worker, and `/_hub/api/*` to agents' API over RPC
  * (`platformFetch`) with the email Access admitted, so the assistant acts for the same person.
  *
- * Every deployed stage binds agents' prod, which owns the assistant; `alchemy dev` binds nothing
- * and the page simply has no shell.
+ * Every deployed stage binds agents' prod, which owns the assistant (hub-bindings.ts); `alchemy
+ * dev` binds nothing and the page simply has no shell.
  */
-import * as Cloudflare from "alchemy/Cloudflare";
-import type * as Effect from "effect/Effect";
-
-const AGENTS_STACK = "cfp";
-const AGENTS_STAGE = "prod";
-
-/** The App's bindings to agents' Workers, by typed ref (another stack's state). */
-export const hubBindings = (
-  dev: boolean,
-): Readonly<Record<string, Effect.Effect<Cloudflare.Worker>>> =>
-  dev
-    ? {}
-    : {
-        HUB_API: Cloudflare.Worker.ref("Api", { stack: AGENTS_STACK, stage: AGENTS_STAGE }),
-        HUB_EMBED: Cloudflare.Worker.ref("Embed", { stack: AGENTS_STACK, stage: AGENTS_STAGE }),
-      };
+// NOTE: The edge imports this module at runtime, so it must not import Alchemy (or anything that
+// does): its bindings live in hub-bindings.ts, which only the stack imports. hub.test.ts checks.
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import type { AccessVerifier } from "./identity.ts";
+import { ACCESS_JWT_HEADER, remoteVerifier, verifyAccessToken } from "./identity.ts";
 
 /** The paths the App Worker runs first for the shell. */
 export const hubPaths = ["/_hub", "/_hub/*"];
+
+/** The email header Access sets for a person it signed in. */
+export const ACCESS_EMAIL_HEADER = "cf-access-authenticated-user-email";
 
 const HUB = "/_hub";
 const HUB_API = `${HUB}/api/`;
@@ -54,24 +47,72 @@ const unbound = () => new Response("The hub shell isn't available here.", { stat
 /** Whether `url` is the shell's. */
 export const isHubPath = (url: URL) => url.pathname === HUB || url.pathname.startsWith(`${HUB}/`);
 
+// NOTE: The App's Access application also admits the AgentToken service token, whose JWT names no
+// person; an email header sent beside it is the client's own, not Access's. So the header counts
+// only when Access's JWT, verified (signature, issuer, audience, expiry), names the same person.
 /**
- * Forwards a shell request to agents. Only call it for {@link isHubPath} URLs. `email` is the
- * person the assistant acts for; by default the one Access admitted (it sets this header on
- * every request it lets through, and a service token has none, which the assistant refuses).
+ * The person Access admitted: the email in the request's verified Access JWT, when the email
+ * header names the same person. Null for a service token, a forged or mismatched header, an
+ * invalid or missing JWT, or no verifier.
  */
-export const forwardToHub = (
+export const admittedEmail = Effect.fn("Hub.admittedEmail")(function* (
+  request: Request,
+  verifier: Option.Option<AccessVerifier>,
+) {
+  const header = request.headers.get(ACCESS_EMAIL_HEADER)?.trim() ?? "";
+  if (header === "" || Option.isNone(verifier)) return null;
+  const principal = yield* verifyAccessToken(
+    request.headers.get(ACCESS_JWT_HEADER) ?? undefined,
+    verifier.value,
+  );
+  return Option.match(principal, {
+    onNone: () => null,
+    onSome: (verified) =>
+      verified._tag === "User" && verified.email.toLowerCase() === header.toLowerCase()
+        ? verified.email
+        : null,
+  });
+});
+
+// The verifier caches the team's signing keys, so keep one per isolate (per env settings).
+let cachedVerifier: { readonly key: string; readonly verifier: Option.Option<AccessVerifier> } = {
+  key: "",
+  verifier: Option.none(),
+};
+
+/** The Access verifier for the App's `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`; none without them. */
+export const hubVerifier = (
+  env: Readonly<Record<string, unknown>>,
+): Option.Option<AccessVerifier> => {
+  const teamDomain = env["ACCESS_TEAM_DOMAIN"];
+  const audience = env["ACCESS_AUD"];
+  if (typeof teamDomain !== "string" || typeof audience !== "string") return Option.none();
+  const key = `${teamDomain}\n${audience}`;
+  if (cachedVerifier.key !== key) {
+    cachedVerifier = { key, verifier: remoteVerifier(teamDomain, audience) };
+  }
+  return cachedVerifier.verifier;
+};
+
+/**
+ * Forwards a shell request to agents. Only call it for {@link isHubPath} URLs. API calls carry
+ * the person the assistant acts for: the one Access admitted ({@link admittedEmail}), or null,
+ * which the assistant refuses.
+ */
+export const forwardToHub = async (
   request: Request,
   url: URL,
   env: Readonly<Record<string, unknown>>,
-  email: string | null = request.headers.get("cf-access-authenticated-user-email"),
+  verifier: Option.Option<AccessVerifier> = hubVerifier(env),
 ): Promise<Response> => {
   if (url.pathname.startsWith(HUB_API)) {
     const api = env["HUB_API"];
-    if (!isPlatformApi(api)) return Promise.resolve(unbound());
+    if (!isPlatformApi(api)) return unbound();
+    const email = await Effect.runPromise(admittedEmail(request, verifier));
     // The API's own path: the prefix dropped, the query kept.
     const forwarded = `${url.origin}${url.pathname.slice(HUB.length)}${url.search}`;
     return api.platformFetch(new Request(forwarded, request), email);
   }
   const embed = env["HUB_EMBED"];
-  return isFetcher(embed) ? embed.fetch(request) : Promise.resolve(unbound());
+  return isFetcher(embed) ? embed.fetch(request) : unbound();
 };

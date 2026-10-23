@@ -26,9 +26,11 @@ An entity store on Cloudflare D1 where schemas and the lenses between schema ver
 
 ## The hub shell
 
-This app carries the platform's hub shell: the app rail and the assistant drawer, served by the agents project (`docs/hub-shell.md` there). `src/platform/cloudflare/hub.ts` binds agents' prod `Api` and `Embed` Workers on deployed stages and forwards `/_hub/*` to them from the App Worker, `index.html` loads `/_hub/shell.js` with `data-app="entities"`, and the CSP allows `frame-src 'self'`. agents also binds this app's `Api` to give the assistant read-only entity tools; keep the RPC's read methods compatible.
+This app carries the platform's hub shell: the app rail and the assistant drawer, served by the agents project (`docs/hub-shell.md` there). `src/platform/cloudflare/hub-bindings.ts` binds agents' prod `Api` and `Embed` Workers on deployed stages, `hub.ts` forwards `/_hub/*` to them from the App Worker, `index.html` loads `/_hub/shell.js` with `data-app="entities"`, and the CSP allows `frame-src 'self'`. agents also binds this app's `Api` to give the assistant read-only entity tools; keep the RPC's read methods compatible.
 
-- The App Worker forwards `/_hub/api/*` with the email Access admitted, and agents trusts it. Keep `/_hub/*` behind Access.
+- The App Worker forwards `/_hub/api/*` with the email Access admitted, and agents trusts it. The email counts only when the request's `cf-access-jwt-assertion`, verified against the App's `ACCESS_AUD` and the team's keys, names the same person; otherwise it passes null. The App's Access application also admits the AgentToken, so an email header beside it is the client's own. Keep `/_hub/*` behind Access.
+- The edge's runtime import graph must not reach Alchemy or `cloudflare:*`: Alchemy bindings go in plan-time modules that only `stack.ts` imports (`hub-bindings.ts`). `hub.test.ts` checks.
+- entity-store has no MCP server, so it doesn't implement the platform's `mcp(body, headers)` RPC; the assistant reads entities through the entity-store RPC. (The `@modelcontextprotocol/*` dependencies are peers of `agents`.)
 - Deploy agents first when the shell's protocol changes; this app only forwards.
 
 ## Ownership and scope

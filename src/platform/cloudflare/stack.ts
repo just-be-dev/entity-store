@@ -4,9 +4,10 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { AccessApp, AgentToken, isDev } from "./access.ts";
+import { AccessApp, AgentToken, isDev, teamDomain } from "./access.ts";
 import Api from "./api.ts";
-import { hubBindings, hubPaths } from "./hub.ts";
+import { hubBindings } from "./hub-bindings.ts";
+import { hubPaths } from "./hub.ts";
 import { ChangesQueue } from "./queue.ts";
 
 /** An optional variable; blank counts as unset. */
@@ -43,20 +44,34 @@ export const DeployConfig = Config.all({
 
 const { prodRoute } = Effect.runSync(DeployConfig);
 
-export const App = Cloudflare.Website.Foldkit("App", {
-  main: "src/platform/cloudflare/edge.ts",
-  env: { API: Api, ...hubBindings(isDev) },
-  // Behind Cloudflare Access when deployed (see access.ts); open in local dev.
-  ...(isDev ? {} : { access: AccessApp }),
-  assets: { runWorkerFirst: ["/api/*", ...hubPaths] },
-  ...Option.match(prodRoute, { onNone: () => ({}), onSome: ({ routes }) => ({ routes }) }),
-  compatibility: { date: "2026-10-04" },
-  observability: {
-    enabled: true,
-    logs: { enabled: true, invocationLogs: true, headSamplingRate: 1, persist: true },
-    traces: { enabled: true, headSamplingRate: 1, persist: true },
-  },
-});
+export const App = Cloudflare.Website.Foldkit(
+  "App",
+  Effect.gen(function* () {
+    // Behind Cloudflare Access when deployed (see access.ts); open in local dev. The edge
+    // verifies Access's JWT itself before forwarding a person to the hub shell (hub.ts).
+    // Blank in local dev, where nothing is verified (and no shell is bound).
+    const access = isDev ? undefined : yield* AccessApp;
+    const team = access === undefined ? "" : yield* teamDomain;
+    return {
+      main: "src/platform/cloudflare/edge.ts",
+      env: {
+        API: Api,
+        ...hubBindings(isDev),
+        ACCESS_AUD: access === undefined ? "" : access.aud,
+        ACCESS_TEAM_DOMAIN: team,
+      },
+      ...(access === undefined ? {} : { access }),
+      assets: { runWorkerFirst: ["/api/*", ...hubPaths] },
+      ...Option.match(prodRoute, { onNone: () => ({}), onSome: ({ routes }) => ({ routes }) }),
+      compatibility: { date: "2026-10-04" },
+      observability: {
+        enabled: true,
+        logs: { enabled: true, invocationLogs: true, headSamplingRate: 1, persist: true },
+        traces: { enabled: true, headSamplingRate: 1, persist: true },
+      },
+    };
+  }),
+);
 
 export type AppEnv = Cloudflare.InferEnv<typeof App>;
 

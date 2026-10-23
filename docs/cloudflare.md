@@ -9,9 +9,11 @@ Browser / client
           │
           ▼
 Website (Cloudflare.Website.Foldkit) ── static assets
-          │ /api/*, runWorkerFirst
+          │ /api/*, /_hub/*, runWorkerFirst
           ▼
 edge.ts ── service binding ── Api Worker ◀── direct client (workers.dev)
+   │
+   └── /_hub/* ── agents' prod Embed and Api Workers (hub shell, hub.ts)
                                    │  ▲
                                    │  └── RPC from other stacks' Workers (service binding)
                                    ├── domain services
@@ -19,7 +21,11 @@ edge.ts ── service binding ── Api Worker ◀── direct client (worker
                                    └── Changes queue ──▶ consumer in another stack
 ```
 
-The Website is a `Cloudflare.Website.Foldkit` with `env: { API: Api }` and `assets.runWorkerFirst: ["/api/*"]`. The API is a `Cloudflare.Worker` that keeps Alchemy's default `workersDev: true`, which gives it a stable workers.dev URL and per-version preview URLs. `edge.ts` gets its env type from `Cloudflare.InferEnv<typeof App>` and only forwards requests to the binding. Routing and business logic live in the API.
+The Website is a `Cloudflare.Website.Foldkit` with `env: { API: Api, HUB_API, HUB_EMBED, ACCESS_AUD, ACCESS_TEAM_DOMAIN }` and `assets.runWorkerFirst: ["/api/*", "/_hub", "/_hub/*"]`. The API is a `Cloudflare.Worker` that keeps Alchemy's default `workersDev: true`, which gives it a stable workers.dev URL and per-version preview URLs. `edge.ts` declares the env it reads (`EdgeEnv`, checked against `Cloudflare.InferEnv<typeof App>` in `hub.test.ts`) and only forwards requests: `/_hub/*` to agents (`hub.ts`), everything else to the API binding. Routing and business logic live in the API.
+
+The edge is bundled from `edge.ts`, so nothing it imports at runtime may load Alchemy or `cloudflare:*`. Agents' Worker refs live in `hub-bindings.ts`, which only `stack.ts` imports.
+
+On deployed stages the edge forwards `/_hub/api/*` to agents' `platformFetch` with the person Access admitted: the email in the request's `Cf-Access-Jwt-Assertion`, verified like the API does (below) with the App's own `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN`, when the `Cf-Access-Authenticated-User-Email` header names the same person. A service token's JWT names no one, so the AgentToken with a forged email header is forwarded as no one, and agents refuses it.
 
 Both Workers are behind Cloudflare Access when deployed (`access.ts`). The API checks identity on every request, since requests can arrive directly or through the Website.
 

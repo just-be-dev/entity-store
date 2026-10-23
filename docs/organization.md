@@ -20,7 +20,9 @@ src/
     boundary.test.ts               dependency-direction check
     cloudflare/
       stack.ts                     Alchemy stack, Website, telemetry, state
-      edge.ts                      Website entry that forwards to the API
+      edge.ts                      Website entry that forwards to the API and the hub shell
+      hub.ts                       hub shell forwarding (runtime, no Alchemy)
+      hub-bindings.ts              agents' Worker refs for the hub shell (plan time)
       api.ts                       API Worker, telemetry, per-request layers
       database.ts                  D1 database declaration
       <domain>-d1.ts               D1 adapter
