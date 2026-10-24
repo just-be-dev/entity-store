@@ -101,6 +101,8 @@ export const apiFailure = (
     problems: [],
     linkedFrom: [],
     conflicts: [],
+    reasons: [],
+    currentVersion: Option.none(),
     ...extra,
   });
 

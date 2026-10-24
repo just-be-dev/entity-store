@@ -219,6 +219,73 @@ export const LensFunctions = Schema.Struct({ items: Schema.Array(LensFunction) }
 export const Direction = Schema.Literals(["forward", "backward"]);
 export type Direction = typeof Direction.Type;
 
+// ─── Who uses a type ────────────────────────────────────────────────────────
+
+export const TriggerKind = Schema.Literals(["manual", "entity", "event", "schedule", "date"]);
+export type TriggerKind = typeof TriggerKind.Type;
+
+/** An automation's saved trigger, as much of it as says what starts a run. */
+export const AutomationTrigger = Schema.Struct({
+  kind: TriggerKind,
+  event: Schema.OptionFromOptionalKey(Schema.String),
+  fields: Schema.OptionFromOptionalKey(Schema.Array(Schema.String)),
+  hasCondition: Schema.Boolean,
+});
+export type AutomationTrigger = typeof AutomationTrigger.Type;
+
+export const AutomationUse = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  trigger: AutomationTrigger,
+});
+export type AutomationUse = typeof AutomationUse.Type;
+
+export const TemplateSlot = Schema.Struct({
+  template: Schema.String,
+  label: Schema.String,
+  slot: Schema.String,
+});
+export type TemplateSlot = typeof TemplateSlot.Type;
+
+/** What automations said about a type, or why it couldn't be asked. */
+export const AutomationsUsage = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("checked"),
+    watching: Schema.Array(AutomationUse),
+    listening: Schema.Array(AutomationUse),
+    templateSlots: Schema.Array(TemplateSlot),
+    unchecked: Schema.Array(
+      Schema.Struct({ id: Schema.String, name: Schema.String, error: Schema.String }),
+    ),
+  }),
+  Schema.Struct({ status: Schema.Literal("unavailable"), reason: Schema.String }),
+]);
+export type AutomationsUsage = typeof AutomationsUsage.Type;
+
+export const TypeConsumers = Schema.Struct({ type: Schema.String, automations: AutomationsUsage });
+export type TypeConsumers = typeof TypeConsumers.Type;
+
+/** A dry run of deleting a type: what would refuse it now. */
+export const DeleteCheck = Schema.Struct({
+  type: Schema.String,
+  latestVersion: Schema.Int,
+  reasons: Schema.Array(Schema.String),
+  consumers: TypeConsumers,
+});
+export type DeleteCheck = typeof DeleteCheck.Type;
+
+export const DeletedType = Schema.Struct({ name: Schema.String });
+
+/** What an upsert would store (`POST …/entities/:id/check`). */
+export const EntityCheck = Schema.Struct({
+  data: Schema.Json,
+  version: Schema.Int,
+  created: Schema.Boolean,
+});
+export type EntityCheck = typeof EntityCheck.Type;
+
+export const Upserted = Schema.Struct({ entity: Entity, created: Schema.Boolean });
+
 // ─── Failures ───────────────────────────────────────────────────────────────
 
 /** Any failed API call, normalized. `status` is 0 when the API wasn't reached. */
@@ -232,6 +299,8 @@ export const ApiFailure = Schema.Struct({
   problems: Schema.Array(LinkProblem),
   linkedFrom: Schema.Array(Backlink),
   conflicts: Schema.Array(UniqueConflict),
+  reasons: Schema.Array(Schema.String),
+  currentVersion: Schema.Option(Schema.Int),
 });
 export type ApiFailure = typeof ApiFailure.Type;
 
@@ -245,4 +314,6 @@ export const ErrorBody = Schema.Struct({
   problems: Schema.optionalKey(Schema.Array(LinkProblem)),
   linkedFrom: Schema.optionalKey(Schema.Array(Backlink)),
   conflicts: Schema.optionalKey(Schema.Array(UniqueConflict)),
+  reasons: Schema.optionalKey(Schema.Array(Schema.String)),
+  currentVersion: Schema.OptionFromOptionalKey(Schema.Int),
 });

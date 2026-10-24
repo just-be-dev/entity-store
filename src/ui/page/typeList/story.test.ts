@@ -1,36 +1,32 @@
 import { describe, expect, it } from "@effect/vitest";
+import { Dialog } from "@foldkit/ui";
 import * as Option from "effect/Option";
 import { Command, expectOutMessage, given, message, model, story } from "foldkit/story";
-import { ApiFailure } from "@/domain/entityStore";
+import * as TypeForm from "@/components/typeForm/main";
+import { Submission } from "@/components/confirm";
+import { apiFailure } from "@/domain/entityStore.fixture";
 import {
-  CheckSchema,
   CreateType,
   FetchTypes,
   init,
   Message,
   NavigateToType,
   OutMessage,
-  Submission,
   update,
 } from "./main.ts";
 
 const initial = init().model;
 
-const failure = (error: string, code: string) =>
-  ApiFailure.make({
-    status: 422,
-    error,
-    code: Option.some(code),
-    issues: [{ path: "fields.x", message: "Unknown field type" }],
-    report: Option.none(),
-    currentRev: Option.none(),
-    problems: [],
-    linkedFrom: [],
-    conflicts: [],
-  });
+const form = (formMessage: TypeForm.Message) =>
+  message(Message.GotFormMessage({ message: formMessage }));
+
+const proposeHire = [
+  form(TypeForm.Message.UpdatedName({ value: " hire " })),
+  form(TypeForm.Message.SubmittedForm()),
+] as const;
 
 describe("type list", () => {
-  it("init fetches the types and shows them when they arrive", () => {
+  it("init fetches the types, and links can point at them", () => {
     expect(init().commands?.map((command) => command.name)).toEqual([FetchTypes.name]);
     story(
       update,
@@ -44,86 +40,83 @@ describe("type list", () => {
       ),
       model((m) => {
         expect(m.types._tag).toBe("Loaded");
+        expect(m.form.targets).toEqual(["person"]);
       }),
     );
   });
 
-  it("refuses to submit without a name or with malformed JSON, without calling the API", () => {
+  it("asks for confirmation before creating, then creates and navigates", () => {
     story(
       update,
       given(initial),
-      message(Message.SubmittedNewType()),
-      Command.expectNone(),
-      model((m) =>
-        expect(m.submission).toEqual({ _tag: "Invalid", message: "Give the type a name." }),
-      ),
-      message(Message.UpdatedName({ value: "person" })),
-      message(Message.UpdatedSchemaText({ value: "{ fields: " })),
-      message(Message.SubmittedNewType()),
-      Command.expectNone(),
+      ...proposeHire,
       model((m) => {
-        expect(m.submission._tag).toBe("Invalid");
-        if (m.submission._tag === "Invalid") {
-          expect(m.submission.message).toMatch(/^Schema isn't valid JSON/);
-        }
+        expect(Option.map(m.maybePending, (pending) => pending.name)).toEqual(Option.some("hire"));
+        expect(m.dialog.isOpen).toBe(true);
       }),
-    );
-  });
-
-  it("creates a type, then navigates to it", () => {
-    story(
-      update,
-      given(initial),
-      message(Message.UpdatedName({ value: "  person " })),
-      message(Message.UpdatedSchemaText({ value: '{"fields":{}}' })),
-      message(Message.SubmittedNewType()),
-      model((m) => expect(m.submission._tag).toBe("Submitting")),
-      Command.expectHas(CreateType({ name: "person", description: "", schema: { fields: {} } })),
-      Command.resolve(CreateType, Message.SucceededCreateType({ name: "person" })),
-      expectOutMessage(OutMessage.CreatedType({ name: "person" })),
-      Command.expectHas(NavigateToType({ name: "person" })),
+      Command.expectHas(Dialog.ShowDialog),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      message(Message.ClickedConfirm()),
+      model((m) => expect(m.submission._tag).toBe("Working")),
+      Command.expectHas(
+        CreateType({
+          name: "hire",
+          description: "",
+          schema: { title: "name", fields: { name: { type: "string" } } },
+        }),
+      ),
+      Command.resolve(CreateType, Message.SucceededCreateType({ name: "hire" })),
+      expectOutMessage(OutMessage.CreatedType({ name: "hire" })),
+      model((m) => {
+        expect(m.dialog.isOpen).toBe(false);
+        expect(m.maybePending).toEqual(Option.none());
+      }),
+      Command.resolve(Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()),
       Command.resolve(NavigateToType, Message.CompletedNavigateToType()),
     );
   });
 
-  it("ignores a second submit while one is in flight", () => {
-    story(
-      update,
-      given({ ...initial, name: "person", submission: Submission.Submitting() }),
-      message(Message.SubmittedNewType()),
-      Command.expectNone(),
-    );
-  });
-
-  it("keeps the form and shows the API's issues when creation fails", () => {
+  it("ignores a second confirm while one is in flight", () => {
     story(
       update,
       given(initial),
-      message(Message.UpdatedName({ value: "person" })),
-      message(Message.SubmittedNewType()),
+      ...proposeHire,
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      message(Message.ClickedConfirm()),
+      model((m) => {
+        const again = update(m, Message.ClickedConfirm());
+        expect(again.commands ?? []).toEqual([]);
+      }),
+      Command.resolve(CreateType, Message.SucceededCreateType({ name: "hire" })),
+      Command.resolve(Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()),
+      Command.resolve(NavigateToType, Message.CompletedNavigateToType()),
+    );
+  });
+
+  it("keeps the dialog open with the API's refusal, and closing it drops the pending type", () => {
+    story(
+      update,
+      given(initial),
+      ...proposeHire,
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      message(Message.ClickedConfirm()),
       Command.resolve(
         CreateType,
         Message.FailedCreateType({
-          failure: failure("The schema definition is invalid", "InvalidSchema"),
+          failure: apiFailure(409, "TypeAlreadyExists", "Entity type 'hire' already exists"),
         }),
       ),
       model((m) => {
-        expect(m.name).toBe("person");
         expect(m.submission._tag).toBe("Failed");
+        expect(m.dialog.isOpen).toBe(true);
       }),
-    );
-  });
-
-  it("checks the schema and forgets the result when the schema changes", () => {
-    story(
-      update,
-      given(initial),
-      message(Message.ClickedCheckSchema()),
-      model((m) => expect(m.schemaCheck._tag).toBe("Checking")),
-      Command.resolve(CheckSchema, Message.SucceededCheckSchema({ ok: true, issues: [] })),
-      model((m) => expect(m.schemaCheck).toEqual({ _tag: "Checked", ok: true, issues: [] })),
-      message(Message.UpdatedSchemaText({ value: "{}" })),
-      model((m) => expect(m.schemaCheck._tag).toBe("Idle")),
+      message(Message.GotDialogMessage({ message: Dialog.Message.RequestedClose() })),
+      model((m) => {
+        expect(m.maybePending).toEqual(Option.none());
+        expect(m.submission).toEqual(Submission.Idle());
+        expect(m.form.draft.name).toBe(" hire ");
+      }),
+      Command.resolve(Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()),
     );
   });
 });

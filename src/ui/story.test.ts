@@ -74,9 +74,7 @@ describe("root", () => {
     story(
       update,
       given(onTypePage),
-      message(
-        Message.GotTypeListMessage({ message: TypeList.Message.UpdatedName({ value: "x" }) }),
-      ),
+      message(Message.GotTypeListMessage({ message: TypeList.Message.ClickedConfirm() })),
       model((m) => expect(m).toEqual(onTypePage)),
     );
   });

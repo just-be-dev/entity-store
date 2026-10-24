@@ -28,6 +28,8 @@ const failure = (status: number, error: string): ApiFailure =>
     problems: [],
     linkedFrom: [],
     conflicts: [],
+    reasons: [],
+    currentVersion: Option.none(),
   });
 
 const decodeErrorBody = Schema.decodeUnknownResult(ErrorBody);
@@ -47,6 +49,8 @@ export const toApiFailure = (status: number, body: unknown): ApiFailure =>
         problems: decoded.problems ?? [],
         linkedFrom: decoded.linkedFrom ?? [],
         conflicts: decoded.conflicts ?? [],
+        reasons: decoded.reasons ?? [],
+        currentVersion: decoded.currentVersion,
       }),
   });
 
@@ -91,6 +95,9 @@ export const postJson = <A>(url: string, body: unknown, schema: Schema.Decoder<A
 
 export const putJson = <A>(url: string, body: unknown, schema: Schema.Decoder<A>) =>
   send(HttpClientRequest.bodyJsonUnsafe(HttpClientRequest.put(url), body), schema);
+
+export const patchJson = <A>(url: string, body: unknown, schema: Schema.Decoder<A>) =>
+  send(HttpClientRequest.bodyJsonUnsafe(HttpClientRequest.patch(url), body), schema);
 
 export const deleteJson = <A>(url: string, schema: Schema.Decoder<A>) =>
   send(HttpClientRequest.make("DELETE")(url), schema);

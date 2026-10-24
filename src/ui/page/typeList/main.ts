@@ -1,44 +1,26 @@
 import * as Array from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as String from "effect/String";
-import * as Result from "effect/Result";
-import { Command, Submodel } from "foldkit";
+import { Command, Submodel, Update } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 import { defineMessageUnion } from "foldkit/message";
 import { pushUrl } from "foldkit/navigation";
 import { defineTaggedUnion } from "foldkit/schema";
 import { modifyFields } from "foldkit/struct";
-import type * as Update from "foldkit/update";
 import { apiUrl, getJson, postJson } from "@/api";
-import { errorAlert, failureAlert, issueList, successAlert } from "@/components/feedback";
+import { Proposal, Submission, Usage, confirmDialog, initDialog } from "@/components/confirm";
+import { failureAlert } from "@/components/feedback";
 import { pageHeader, section, statusText } from "@/components/layout";
+import * as TypeForm from "@/components/typeForm/main";
 import { badge } from "@/components/ui/badge";
-import { button } from "@/components/ui/button";
+import * as Dialog from "@/components/ui/dialog";
 import { Empty } from "@/components/ui/empty";
-import { input } from "@/components/ui/input";
-import { textarea } from "@/components/ui/textarea";
-import {
-  ApiFailure,
-  Issue,
-  SchemaCheck as SchemaCheckResponse,
-  TypeInfo,
-  TypeList,
-  TypeSummary,
-} from "@/domain/entityStore";
-import { parseJson } from "@/domain/json";
+import { Impact } from "@/domain/consequences";
+import { ApiFailure, TypeInfo, TypeList, TypeSummary } from "@/domain/entityStore";
 import { formatTime } from "@/lib/format";
 import { AppRoute, href } from "@/route";
-
-export const EXAMPLE_SCHEMA = `{
-  "description": "A person",
-  "fields": {
-    "name": { "type": "string", "minLength": 1 },
-    "email": { "type": "string", "format": "email" },
-    "age": { "type": "number", "integer": true, "min": 0, "optional": true },
-    "tags": { "type": "array", "items": { "type": "string" } }
-  }
-}`;
+import { EntitySchema } from "../../../schema/model.ts";
 
 // MODEL
 
@@ -49,29 +31,20 @@ export const Types = defineTaggedUnion({
 });
 export type Types = typeof Types.Type;
 
-export const SchemaCheck = defineTaggedUnion({
-  Idle: {},
-  Checking: {},
-  Invalid: { message: Schema.String },
-  Checked: { ok: Schema.Boolean, issues: Schema.Array(Issue) },
-  Failed: { failure: ApiFailure },
+/** A new type waiting for confirmation. */
+export const PendingType = Schema.Struct({
+  name: Schema.String,
+  description: Schema.String,
+  schema: EntitySchema,
+  proposal: Proposal,
 });
-export type SchemaCheck = typeof SchemaCheck.Type;
-
-export const Submission = defineTaggedUnion({
-  Idle: {},
-  Submitting: {},
-  Invalid: { message: Schema.String },
-  Failed: { failure: ApiFailure },
-});
-export type Submission = typeof Submission.Type;
+export type PendingType = typeof PendingType.Type;
 
 export const Model = Schema.Struct({
   types: Types,
-  name: Schema.String,
-  description: Schema.String,
-  schemaText: Schema.String,
-  schemaCheck: SchemaCheck,
+  form: TypeForm.Model,
+  dialog: Dialog.Model,
+  maybePending: Schema.Option(PendingType),
   submission: Submission,
 });
 export type Model = typeof Model.Type;
@@ -81,13 +54,9 @@ export type Model = typeof Model.Type;
 export const Message = defineMessageUnion({
   SucceededFetchTypes: { items: Schema.Array(TypeSummary) },
   FailedFetchTypes: { failure: ApiFailure },
-  UpdatedName: { value: Schema.String },
-  UpdatedDescription: { value: Schema.String },
-  UpdatedSchemaText: { value: Schema.String },
-  ClickedCheckSchema: {},
-  SucceededCheckSchema: { ok: Schema.Boolean, issues: Schema.Array(Issue) },
-  FailedCheckSchema: { failure: ApiFailure },
-  SubmittedNewType: {},
+  GotFormMessage: { message: TypeForm.Message },
+  GotDialogMessage: { message: Dialog.Message },
+  ClickedConfirm: {},
   SucceededCreateType: { name: Schema.String },
   FailedCreateType: { failure: ApiFailure },
   CompletedNavigateToType: {},
@@ -111,18 +80,8 @@ export const FetchTypes = Command.define("FetchTypes", {
   ),
 });
 
-export const CheckSchema = Command.define("CheckSchema", {
-  args: { schema: Schema.Json },
-  messages: [Message.SucceededCheckSchema, Message.FailedCheckSchema],
-  execute: ({ schema }) =>
-    postJson(apiUrl("schema/check"), { schema }, SchemaCheckResponse).pipe(
-      Effect.map(({ ok, issues }) => Message.SucceededCheckSchema({ ok, issues })),
-      Effect.catch((failure) => Effect.succeed(Message.FailedCheckSchema({ failure }))),
-    ),
-});
-
 export const CreateType = Command.define("CreateType", {
-  args: { name: Schema.String, description: Schema.String, schema: Schema.Json },
+  args: { name: Schema.String, description: Schema.String, schema: EntitySchema },
   messages: [Message.SucceededCreateType, Message.FailedCreateType],
   execute: ({ name, description, schema }) =>
     postJson(apiUrl("types"), { name, description, schema }, TypeInfo).pipe(
@@ -143,10 +102,9 @@ export const NavigateToType = Command.define("NavigateToType", {
 export const init = (): Update.Return<Model, Message> => ({
   model: Model.make({
     types: Types.Loading(),
-    name: "",
-    description: "",
-    schemaText: EXAMPLE_SCHEMA,
-    schemaCheck: SchemaCheck.Idle(),
+    form: TypeForm.initCreate([]),
+    dialog: initDialog(),
+    maybePending: Option.none(),
     submission: Submission.Idle(),
   }),
   commands: [FetchTypes()],
@@ -154,75 +112,151 @@ export const init = (): Update.Return<Model, Message> => ({
 
 // UPDATE
 
-const isSubmitting = (submission: Submission) => submission._tag === "Submitting";
+type UpdateReturn = Update.ReturnWithOutMessage<Model, Message, OutMessage>;
+
+const toDialogMessage = (message: Dialog.Message) => Message.GotDialogMessage({ message });
+
+const readDialog = (model: Model) => Option.some(model.dialog);
+const writeDialog = (model: Model, nextDialog: Dialog.Model) =>
+  modifyFields(model, { dialog: () => nextDialog });
+
+/** A closed dialog drops its pending write, unless the write is in flight. */
+const foldDialogOutMessage = (outMessage: Dialog.OutMessage) =>
+  Dialog.OutMessage.match(outMessage, {
+    Opened: () => (stepModel: Model) => ({ model: stepModel }),
+    Closed: () => (stepModel: Model) => ({
+      model:
+        stepModel.submission._tag === "Working"
+          ? stepModel
+          : modifyFields(stepModel, {
+              maybePending: () => Option.none(),
+              submission: () => Submission.Idle(),
+            }),
+    }),
+  });
+
+const foldDialog = Update.foldChild({
+  update: Dialog.update,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const openDialog = Update.foldChildStep({
+  update: Dialog.open,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const closeDialog = Update.foldChildStep({
+  update: Dialog.close,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const foldFormTargets = Update.foldChild({
+  update: TypeForm.withTargets,
+  read: (model: Model) => Option.some(model.form),
+  write: (model: Model, nextForm: TypeForm.Model) => modifyFields(model, { form: () => nextForm }),
+  toParentMessage: (message: TypeForm.Message) => Message.GotFormMessage({ message }),
+});
+
+const foldForm = Update.foldChild({
+  update: TypeForm.update,
+  read: (model: Model) => Option.some(model.form),
+  write: (model: Model, nextForm: TypeForm.Model) => modifyFields(model, { form: () => nextForm }),
+  toParentMessage: (message: TypeForm.Message) => Message.GotFormMessage({ message }),
+  foldOutMessage: (outMessage) =>
+    TypeForm.OutMessage.match(outMessage, {
+      SubmittedNewType: ({ name, description, schema, details }) =>
+        Update.combine([
+          (stepModel: Model) => ({
+            model: modifyFields(stepModel, {
+              maybePending: () =>
+                Option.some(
+                  PendingType.make({
+                    name,
+                    description,
+                    schema,
+                    proposal: Proposal.make({
+                      title: `Create ${name}`,
+                      summary: `A new entity type at v1${description === "" ? "" : `: ${description}`}.`,
+                      confirmLabel: "Create type",
+                      isDestructive: false,
+                      details,
+                      notes: [],
+                      refusals: [],
+                      impact: Impact.TypeSave({
+                        type: name,
+                        isNew: true,
+                        renamed: [],
+                        removed: [],
+                      }),
+                    }),
+                  }),
+                ),
+              submission: () => Submission.Idle(),
+            }),
+          }),
+          openDialog,
+        ]),
+      SubmittedVersion: () => (stepModel: Model) => ({ model: stepModel }),
+      Cancelled: () => (stepModel: Model) => ({ model: stepModel }),
+    }),
+});
+
+/** For a new type there's nobody to ask: nothing can use it yet. */
+const newTypeUsage = Usage.Loaded({
+  usage: { status: "checked", watching: [], listening: [], templateSlots: [], unchecked: [] },
+});
 
 export const update = (model: Model, message: Message) =>
-  Message.match<Update.ReturnWithOutMessage<Model, Message, OutMessage>>(message, {
-    SucceededFetchTypes: ({ items }) => ({
-      model: modifyFields(model, { types: () => Types.Loaded({ items }) }),
-    }),
+  Message.match<UpdateReturn>(message, {
+    SucceededFetchTypes: ({ items }) =>
+      foldFormTargets(
+        modifyFields(model, { types: () => Types.Loaded({ items }) }),
+        Array.map(items, (type) => type.name),
+      ),
     FailedFetchTypes: ({ failure }) => ({
       model: modifyFields(model, { types: () => Types.Failed({ failure }) }),
     }),
-    UpdatedName: ({ value }) => ({ model: modifyFields(model, { name: () => value }) }),
-    UpdatedDescription: ({ value }) => ({
-      model: modifyFields(model, { description: () => value }),
-    }),
-    UpdatedSchemaText: ({ value }) => ({
-      model: modifyFields(model, {
-        schemaText: () => value,
-        schemaCheck: () => SchemaCheck.Idle(),
+    GotFormMessage: ({ message: formMessage }) => foldForm(model, formMessage),
+    GotDialogMessage: ({ message: dialogMessage }) => foldDialog(model, dialogMessage),
+    ClickedConfirm: () =>
+      Option.match(model.maybePending, {
+        onNone: () => ({ model }),
+        onSome: (pending) =>
+          model.submission._tag === "Working"
+            ? { model }
+            : {
+                model: modifyFields(model, { submission: () => Submission.Working() }),
+                commands: [
+                  CreateType({
+                    name: pending.name,
+                    description: pending.description,
+                    schema: pending.schema,
+                  }),
+                ],
+              },
       }),
-    }),
-    ClickedCheckSchema: () =>
-      Result.match(parseJson(model.schemaText), {
-        onFailure: (message) => ({
-          model: modifyFields(model, {
-            schemaCheck: () =>
-              SchemaCheck.Invalid({ message: `Schema isn't valid JSON: ${message}` }),
-          }),
+    SucceededCreateType: ({ name }) => {
+      const closed = closeDialog(
+        modifyFields(model, {
+          maybePending: () => Option.none(),
+          submission: () => Submission.Idle(),
         }),
-        onSuccess: (schema) => ({
-          model: modifyFields(model, { schemaCheck: () => SchemaCheck.Checking() }),
-          commands: [CheckSchema({ schema })],
-        }),
-      }),
-    SucceededCheckSchema: ({ ok, issues }) => ({
-      model: modifyFields(model, { schemaCheck: () => SchemaCheck.Checked({ ok, issues }) }),
-    }),
-    FailedCheckSchema: ({ failure }) => ({
-      model: modifyFields(model, { schemaCheck: () => SchemaCheck.Failed({ failure }) }),
-    }),
-    SubmittedNewType: () => {
-      if (isSubmitting(model.submission)) {
-        return { model };
-      }
-      const name = model.name.trim();
-      if (String.isEmpty(name)) {
-        return {
-          model: modifyFields(model, {
-            submission: () => Submission.Invalid({ message: "Give the type a name." }),
-          }),
-        };
-      }
-      return Result.match(parseJson(model.schemaText), {
-        onFailure: (message) => ({
-          model: modifyFields(model, {
-            submission: () =>
-              Submission.Invalid({ message: `Schema isn't valid JSON: ${message}` }),
-          }),
-        }),
-        onSuccess: (schema) => ({
-          model: modifyFields(model, { submission: () => Submission.Submitting() }),
-          commands: [CreateType({ name, description: model.description.trim(), schema })],
-        }),
-      });
+      );
+      return {
+        model: closed.model,
+        commands: [...(closed.commands ?? []), NavigateToType({ name })],
+        outMessage: OutMessage.CreatedType({ name }),
+      };
     },
-    SucceededCreateType: ({ name }) => ({
-      model,
-      commands: [NavigateToType({ name })],
-      outMessage: OutMessage.CreatedType({ name }),
-    }),
     FailedCreateType: ({ failure }) => ({
       model: modifyFields(model, { submission: () => Submission.Failed({ failure }) }),
     }),
@@ -270,7 +304,7 @@ const typesTable = (items: ReadonlyArray<TypeSummary>, h: HtmlBuilder<Message>):
             {},
             [
               Empty.title({}, ["No entity types yet"], h),
-              Empty.description({}, ["Define a schema below to create the first one."], h),
+              Empty.description({}, ["Define one below to create the first."], h),
             ],
             h,
           ),
@@ -311,103 +345,6 @@ const typesTable = (items: ReadonlyArray<TypeSummary>, h: HtmlBuilder<Message>):
       ),
   });
 
-const schemaCheckView = (check: SchemaCheck, h: HtmlBuilder<Message>): Html =>
-  SchemaCheck.match(check, {
-    Idle: () => h.empty,
-    Checking: () => statusText("Checking schema…", h),
-    Invalid: ({ message }) => errorAlert(message, h),
-    Checked: ({ ok, issues }) =>
-      ok
-        ? successAlert(["Schema looks good."], h)
-        : h.div(
-            [
-              h.Class(
-                "rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive",
-              ),
-              h.Role("alert"),
-            ],
-            [h.span([h.Class("font-medium")], ["The schema has problems:"]), issueList(issues, h)],
-          ),
-    Failed: ({ failure }) => failureAlert(failure, h),
-  });
-
-const submissionView = (submission: Submission, h: HtmlBuilder<Message>): Html =>
-  Submission.match(submission, {
-    Idle: () => h.empty,
-    Submitting: () => statusText("Creating type…", h),
-    Invalid: ({ message }) => errorAlert(message, h),
-    Failed: ({ failure }) => failureAlert(failure, h),
-  });
-
-const newTypeForm = (model: Model, h: HtmlBuilder<Message>): Html =>
-  h.form(
-    [h.OnSubmit(Message.SubmittedNewType()), h.Class("space-y-4"), h.AriaLabel("New type")],
-    [
-      h.div(
-        [h.Class("grid gap-4 sm:grid-cols-[minmax(0,14rem)_1fr]")],
-        [
-          input(
-            {
-              id: "new-type-name",
-              label: "Name",
-              value: model.name,
-              placeholder: "person",
-              description: "Letters, digits, '_' or '-'.",
-              onInput: (value) => Message.UpdatedName({ value }),
-              className: "font-mono",
-            },
-            h,
-          ),
-          input(
-            {
-              id: "new-type-description",
-              label: "Description",
-              value: model.description,
-              placeholder: "What is this entity?",
-              onInput: (value) => Message.UpdatedDescription({ value }),
-            },
-            h,
-          ),
-        ],
-      ),
-      textarea(
-        {
-          id: "new-type-schema",
-          label: "Schema (JSON)",
-          description:
-            "The root is an object with `fields`. See docs/data-model.md for field types.",
-          value: model.schemaText,
-          rows: 14,
-          onInput: (value) => Message.UpdatedSchemaText({ value }),
-          className: "max-h-[32rem] font-mono text-xs",
-        },
-        h,
-      ),
-      schemaCheckView(model.schemaCheck, h),
-      submissionView(model.submission, h),
-      h.div(
-        [h.Class("flex flex-wrap gap-2")],
-        [
-          button(
-            { type: "submit", isDisabled: isSubmitting(model.submission) },
-            isSubmitting(model.submission) ? "Creating…" : "Create type",
-            h,
-          ),
-          button(
-            {
-              type: "button",
-              variant: "outline",
-              onClick: Message.ClickedCheckSchema(),
-              isDisabled: model.schemaCheck._tag === "Checking",
-            },
-            "Check schema",
-            h,
-          ),
-        ],
-      ),
-    ],
-  );
-
 export const view = Submodel.defineView<Model, Message>((model, h): Html =>
   h.div(
     [h.Class("space-y-6")],
@@ -431,7 +368,29 @@ export const view = Submodel.defineView<Model, Message>((model, h): Html =>
         ],
         h,
       ),
-      section({ title: "New type" }, [newTypeForm(model, h)], h),
+      section(
+        { title: "New type" },
+        [
+          h.submodel({
+            slotId: "new-type-form",
+            model: model.form,
+            view: TypeForm.view,
+            toParentMessage: (message) => Message.GotFormMessage({ message }),
+          }),
+        ],
+        h,
+      ),
+      confirmDialog(
+        {
+          dialog: model.dialog,
+          maybeProposal: Option.map(model.maybePending, (pending) => pending.proposal),
+          usage: newTypeUsage,
+          submission: model.submission,
+          onConfirm: Message.ClickedConfirm(),
+          toDialogMessage,
+        },
+        h,
+      ),
     ],
   ),
 );
