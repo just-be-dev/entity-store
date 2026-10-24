@@ -745,10 +745,12 @@ const makeEntityStore = Effect.gen(function* () {
       Effect.map((state) => state.summary.latestVersion),
       Effect.catchTag("TypeNotFound", () => Effect.succeed(undefined)),
     );
+    // A type deleted and created again can be back at the expected version; its latest
+    // version then says nothing about why the batch matched nothing.
     return new VersionConflict({
       type: name,
       expected,
-      ...(current === undefined ? {} : { currentVersion: current }),
+      ...(current === undefined || current === expected ? {} : { currentVersion: current }),
     });
   });
 

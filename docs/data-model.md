@@ -116,7 +116,10 @@ created concurrently is never lost.
 version to be `expectedVersion`, the one the person saw. A different version
 fails with `VersionConflict`, before the in-use check, and the batch deletes
 the type row only `AND latest_version = expectedVersion`, so a version added
-between the check and the batch fails the delete the same way.
+between the check and the batch fails the delete the same way. It pins the
+version, not the incarnation: a type deleted and created again, back at the
+same version with no entities, still matches. (`addVersion`'s batch also
+pins the incarnation, so a new version can't land on a recreated type.)
 `addVersion` and `checkVersion` take the same `expectedVersion`: the version
 the new lens goes from.
 
