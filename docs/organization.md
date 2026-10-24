@@ -20,9 +20,12 @@ src/
     boundary.test.ts               dependency-direction check
     cloudflare/
       stack.ts                     Alchemy stack, Website, telemetry, state
-      edge.ts                      Website entry that forwards to the API and the hub shell
+      edge.ts                      Website entry: API, hub shell, hub redirect, assets
       hub.ts                       hub shell forwarding (runtime, no Alchemy)
       hub-bindings.ts              agents' Worker refs for the hub shell (plan time)
+      hub-frame.ts                 hub prod's token and key refs, audience, prefix (plan time)
+      hub-identity.ts              verifies the hub's x-hub-identity token
+      hub-redirect.ts              sends page loads on the app's hostname to the hub
       api.ts                       API Worker, telemetry, per-request layers
       database.ts                  D1 database declaration
       <domain>-d1.ts               D1 adapter
@@ -34,6 +37,7 @@ src/
     main.ts                        root init, plus all definitions in a small app
     model.ts / message.ts          root Schema state and Messages
     command.ts / route.ts          root effects and URL mapping
+    basePath.ts                    the runtime base path the hub frames the app under
     hub-nav.ts / subscription.ts   what the hub shell's sidebar lists, and publishing it
     update/ / view/                split by area as the root grows
     page/<page>/                   page Submodels and their tests

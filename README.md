@@ -90,17 +90,21 @@ Both Workers sit behind one Cloudflare Access application, covering custom route
 
 - Members of the Cloudflare account sign in through Access, with their Cloudflare login email.
 - Automated clients send the `AgentToken` service token's headers: `CF-Access-Client-Id` (the stack's `agentTokenClientId` output) and `CF-Access-Client-Secret` (stored in Alchemy state).
+- hub.just-be.dev, which frames the app for people, sends hub prod's `PlatformToken`. It acts only for the person its signed `x-hub-identity` token names.
+
+People use the app through the hub: `hub.just-be.dev/entities/` for prod and `hub.just-be.dev/entities@<stage>/` for a preview. Opening a page on the app's own hostname redirects there. Every stage reads hub prod's token and key from the `hub` stack's state at plan time, so hub prod must be deployed first. See [docs/cloudflare.md](docs/cloudflare.md#framed-by-the-hub).
 
 The API answers both on its own workers.dev URL and through the Website's service binding. It accepts a request only with a verified principal:
 
 - **Direct requests:** `ctx.access`, which only Access sets.
 - **Through the Website:** the `Cf-Access-Jwt-Assertion` token, which the API verifies (signature, issuer, audience, expiry).
+- **Through the hub:** the person in the hub's `x-hub-identity` token, only beside hub prod's verified service-token JWT.
 
 Everything except `/api/health` answers `401 Unauthenticated` without a principal. Local dev creates no Access resources; the API acts as `dev@localhost`.
 
 ### Environment variables
 
-All of these are optional. With none set, there are no custom routes. The app is always served from `/`, and the stack is always named `entity-store`, since its name keys Alchemy state.
+All of these are optional. With none set, there are no custom routes. The app is always served from `/` on its own host (the hub serves it under `/entities/`, and the UI reads that base at runtime), and the stack is always named `entity-store`, since its name keys Alchemy state.
 
 | Variable       | Effect                                                       |
 | -------------- | ------------------------------------------------------------ |
