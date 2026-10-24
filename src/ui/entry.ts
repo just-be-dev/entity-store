@@ -1,4 +1,5 @@
 import { Runtime } from "foldkit";
+import { followWithinBase } from "./basePath.ts";
 import { init, Message, Model, update, view } from "./main.ts";
 import { subscriptions } from "./subscription.ts";
 import "@fontsource-variable/inter";
@@ -13,7 +14,7 @@ const application = Runtime.makeApplication({
   subscriptions,
   container: document.getElementById("root"),
   routing: {
-    onUrlRequest: (request) => Message.ClickedLink({ request }),
+    onUrlRequest: (request) => Message.ClickedLink({ request: followWithinBase(request) }),
     onUrlChange: (url) => Message.ChangedUrl({ url }),
   },
   devTools: { Message },

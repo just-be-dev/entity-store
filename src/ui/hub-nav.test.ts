@@ -5,6 +5,7 @@ import { modifyFields } from "foldkit/struct";
 import type { Url } from "foldkit/url";
 import { Box } from "lucide";
 import { ada, apiFailure } from "@/domain/entityStore.fixture";
+import { underBase } from "./basePath.fixture.ts";
 import { HubNav, hubNavOf, iconOf } from "./hub-nav.ts";
 import { init, Message, type Model, NavTypes, update } from "./main.ts";
 import { EntityDetail } from "./page/index.ts";
@@ -48,6 +49,17 @@ describe("hubNavOf", () => {
         { label: "person", href: "/types/person", icon: iconOf(Box), mono: true },
         { label: "post", href: "/types/post", icon: iconOf(Box), mono: true },
       ],
+    });
+  });
+
+  it("links under the hub's base, so the shell gets hub paths", () => {
+    underBase("https://hub.just-be.dev/entities/", () => {
+      const nav = hubNavOf(at("/entities/types/person", loaded));
+      expect(nav.groups[0]?.items[0]?.href).toBe("/entities/");
+      expect(nav.groups[1]?.items.map((item) => [item.href, item.current])).toEqual([
+        ["/entities/types/person", true],
+        ["/entities/types/post", undefined],
+      ]);
     });
   });
 

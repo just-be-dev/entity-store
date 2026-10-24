@@ -1,11 +1,10 @@
 import * as Effect from "effect/Effect";
 import { pipe } from "effect/Function";
 import * as Schema from "effect/Schema";
-import * as String from "effect/String";
 import * as Route from "foldkit/route";
 import { defineRouteUnion, literal, param, slash, string } from "foldkit/route";
-import { modifyFields } from "foldkit/struct";
 import type { Url } from "foldkit/url";
+import { stripUrl, withAppBase } from "./basePath.ts";
 
 export const AppRoute = defineRouteUnion({
   TypeList: {},
@@ -75,27 +74,8 @@ const routeParser = Route.oneOf(
 
 const parseRoute = Route.parseUrlWithFallback(routeParser, AppRoute.NotFound);
 
-/** `/cafe/` → `/cafe`, `/` → ``. */
-export const basePathOf = (baseUrl: string): string =>
-  String.endsWith("/")(baseUrl) ? baseUrl.slice(0, -1) : baseUrl;
-
-/** Remove the base path so routes match whatever prefix the app is served under. */
-export const stripBasePath =
-  (basePath: string) =>
-  (pathname: string): string =>
-    basePath !== "" && (pathname === basePath || pathname.startsWith(`${basePath}/`))
-      ? pathname.slice(basePath.length) || "/"
-      : pathname;
-
-/** The app may be served under a path prefix (Vite `base`). */
-const basePath = basePathOf(import.meta.env.BASE_URL);
-
-const stripBase = stripBasePath(basePath);
-
-export const withBase = (path: string): string => `${basePath}${path}`;
-
-export const urlToAppRoute = (url: Url): AppRoute =>
-  parseRoute(modifyFields(url, { pathname: stripBase }));
+/** The route for a URL in the browser; the app's base path (basePath.ts) is stripped first. */
+export const urlToAppRoute = (url: Url): AppRoute => parseRoute(stripUrl(url));
 
 const routePath = (route: AppRoute): string =>
   AppRoute.match(route, {
@@ -107,5 +87,5 @@ const routePath = (route: AppRoute): string =>
     NotFound: ({ path }) => path,
   });
 
-/** The href for a route, including the base path. */
-export const href = (route: AppRoute): string => withBase(routePath(route));
+/** The href for a route, under the base path the app is served at. */
+export const href = (route: AppRoute): string => withAppBase(routePath(route));

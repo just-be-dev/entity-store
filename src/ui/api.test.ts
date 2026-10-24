@@ -1,13 +1,17 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Option from "effect/Option";
 import { apiUrl, segment, toApiFailure } from "./api.ts";
+import { underBase } from "./basePath.fixture.ts";
 
 describe("api helpers", () => {
-  it("builds relative URLs under the base path", () => {
-    expect(apiUrl("types")).toBe(`${import.meta.env.BASE_URL}api/types`);
+  it("builds API URLs under the base path", () => {
+    expect(apiUrl("types")).toBe("/api/types");
     expect(apiUrl(`entities/${segment("a b")}`, { version: "2" })).toBe(
-      `${import.meta.env.BASE_URL}api/entities/a%20b?version=2`,
+      "/api/entities/a%20b?version=2",
     );
+    underBase("https://hub.just-be.dev/entities@b-x-123abc/", () => {
+      expect(apiUrl("types", { limit: "5" })).toBe("/entities@b-x-123abc/api/types?limit=5");
+    });
   });
 
   it("normalizes the API's error body, keeping conflict and validation details", () => {

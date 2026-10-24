@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Option from "effect/Option";
-import { AppRoute, basePathOf, href, stripBasePath, urlToAppRoute } from "./route.ts";
+import { underBase } from "./basePath.fixture.ts";
+import { AppRoute, href, urlToAppRoute } from "./route.ts";
 
 const url = (pathname: string) => ({
   protocol: "http:",
@@ -42,12 +43,24 @@ describe("routes", () => {
     expect(routes.map((route) => urlToAppRoute(url(href(route))))).toEqual(routes);
   });
 
-  it("strips a project base path before matching", () => {
-    const strip = stripBasePath(basePathOf("/cafe/"));
-    expect(strip("/cafe/types/person")).toBe("/types/person");
-    expect(strip("/cafe")).toBe("/");
-    expect(strip("/cafe/")).toBe("/");
-    expect(strip("/cafeteria/x")).toBe("/cafeteria/x");
-    expect(stripBasePath(basePathOf("/"))("/types/a")).toBe("/types/a");
+  it("routes and prints under the hub's base path", () => {
+    underBase("https://hub.just-be.dev/entities@b-x-123abc/", () => {
+      expect(urlToAppRoute(url("/entities@b-x-123abc/types/person"))).toEqual(
+        AppRoute.TypeDetail({ name: "person" }),
+      );
+      expect(urlToAppRoute(url("/entities@b-x-123abc"))).toEqual(AppRoute.TypeList());
+      expect(urlToAppRoute(url("/entities@b-x-123abc/"))).toEqual(AppRoute.TypeList());
+      expect(href(AppRoute.TypeDetail({ name: "person" }))).toBe(
+        "/entities@b-x-123abc/types/person",
+      );
+      expect(href(AppRoute.TypeList())).toBe("/entities@b-x-123abc/");
+    });
+    // Prod's base is `/entities/`, the same word as the app's own entity route.
+    underBase("https://hub.just-be.dev/entities/", () => {
+      const route = AppRoute.EntityDetail({ id: "ada" });
+      expect(href(route)).toBe("/entities/entities/ada");
+      expect(urlToAppRoute(url(href(route)))).toEqual(route);
+      expect(urlToAppRoute(url("/entities/"))).toEqual(AppRoute.TypeList());
+    });
   });
 });

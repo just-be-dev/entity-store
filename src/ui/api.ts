@@ -7,11 +7,12 @@ import * as Schema from "effect/Schema";
 import * as Http from "foldkit/http";
 import { ApiFailure, ErrorBody } from "@/domain/entityStore";
 import { parseJson } from "@/domain/json";
+import { withAppBase } from "./basePath.ts";
 
-/** API URLs are relative to the app's base path, so the UI works under a project prefix. */
+/** API URLs sit under the app's base path (basePath.ts), so the UI works when the hub frames it. */
 export const apiUrl = (path: string, query: Readonly<Record<string, string>> = {}): string => {
   const search = new URLSearchParams(query).toString();
-  return `${import.meta.env.BASE_URL}api/${path}${search === "" ? "" : `?${search}`}`;
+  return withAppBase(`/api/${path}${search === "" ? "" : `?${search}`}`);
 };
 
 /** Encode one path segment (type names and entity ids). */
