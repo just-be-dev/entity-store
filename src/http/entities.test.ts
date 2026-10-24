@@ -3,33 +3,41 @@ import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import { apiRoutes } from "../api.ts";
+import { AutomationsDirectory, NOT_CONNECTED } from "../consumers/directory.ts";
+import { directoryOverMcp } from "../consumers/mcp.ts";
+import type { McpTransport } from "../consumers/mcp.ts";
 import { testAppLayer } from "../testing/app.ts";
 
-const makeClient = Effect.gen(function* () {
-  const { handler } = yield* Effect.acquireRelease(
-    Effect.sync(() =>
-      HttpRouter.toWebHandler(apiRoutes.pipe(Layer.provideMerge(testAppLayer())), {
-        disableLogger: true,
-      }),
-    ),
-    ({ dispose }) => Effect.promise(dispose),
-  );
-  return (method: string, path: string, body?: unknown | string) =>
-    Effect.promise(async () => {
-      const response = await handler(
-        new Request(`http://app${path}`, {
-          method,
-          ...(body === undefined
-            ? {}
-            : {
-                body: typeof body === "string" ? body : JSON.stringify(body),
-                headers: { "content-type": "application/json" },
-              }),
-        }),
-      );
-      return { status: response.status, body: (await response.json()) as any };
-    });
-});
+/** A client for the API, with automations answering through `automations` (unavailable by default). */
+const clientWith = (automations?: AutomationsDirectory["Service"]) =>
+  Effect.gen(function* () {
+    const { handler } = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          apiRoutes.pipe(Layer.provideMerge(testAppLayer(undefined, undefined, automations))),
+          { disableLogger: true },
+        ),
+      ),
+      ({ dispose }) => Effect.promise(dispose),
+    );
+    return (method: string, path: string, body?: unknown | string) =>
+      Effect.promise(async () => {
+        const response = await handler(
+          new Request(`http://app${path}`, {
+            method,
+            ...(body === undefined
+              ? {}
+              : {
+                  body: typeof body === "string" ? body : JSON.stringify(body),
+                  headers: { "content-type": "application/json" },
+                }),
+          }),
+        );
+        return { status: response.status, body: (await response.json()) as any };
+      });
+  });
+
+const makeClient = clientWith();
 
 const personSchema = {
   fields: {
@@ -573,4 +581,216 @@ describe("entity HTTP API", () => {
       expect((yield* call("POST", path, { patch: [] })).status).toBe(400);
     }),
   );
+
+  it.effect("lists a type's consumers, and says when automations can't be asked", () =>
+    Effect.gen(function* () {
+      const call = yield* clientWith(
+        directoryOverMcp(automationsAnswering(automations, templates)),
+      );
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      const consumers = yield* call("GET", "/api/types/person/consumers");
+      expect(consumers.status).toBe(200);
+      expect(consumers.body).toEqual({
+        type: "person",
+        automations: {
+          status: "checked",
+          watching: [
+            {
+              id: "onboarding",
+              name: "Onboarding",
+              trigger: { kind: "entity", fields: ["start"], hasCondition: true },
+            },
+            { id: "payroll", name: "Payroll", trigger: { kind: "schedule", hasCondition: false } },
+          ],
+          listening: [
+            {
+              id: "audit",
+              name: "Audit",
+              trigger: { kind: "event", event: "entity.deleted", hasCondition: false },
+            },
+          ],
+          templateSlots: [{ template: "welcome", label: "Welcome email", slot: "hire" }],
+          unchecked: [{ id: "stuck", name: "Stuck", error: "It didn't answer" }],
+        },
+      });
+      expect((yield* call("GET", "/api/types/nope/consumers")).status).toBe(404);
+
+      const offline = yield* makeClient;
+      yield* offline("POST", "/api/types", { name: "person", schema: personSchema });
+      const unavailable = yield* offline("GET", "/api/types/person/consumers");
+      expect([unavailable.status, unavailable.body]).toEqual([
+        200,
+        { type: "person", automations: { status: "unavailable", reason: NOT_CONNECTED } },
+      ]);
+      const failing = yield* clientWith(
+        directoryOverMcp({ send: () => Effect.succeed({ status: 500, body: undefined }) }),
+      );
+      yield* failing("POST", "/api/types", { name: "person", schema: personSchema });
+      expect((yield* failing("GET", "/api/types/person/consumers")).body.automations).toEqual({
+        status: "unavailable",
+        reason: "automations answered list_automations with status 500",
+      });
+    }),
+  );
+
+  it.effect("refuses to delete a type automations or template slots use", () =>
+    Effect.gen(function* () {
+      const byWatchers = yield* clientWith(directoryOverMcp(automationsAnswering(automations, [])));
+      yield* byWatchers("POST", "/api/types", { name: "person", schema: personSchema });
+      const watched = yield* byWatchers("DELETE", "/api/types/person");
+      expect([watched.status, watched.body]).toEqual([
+        409,
+        {
+          error:
+            "Entity type 'person' is in use: automations use it: onboarding (Onboarding), payroll (Payroll)",
+          code: "TypeInUse",
+          type: "person",
+          reasons: ["automations use it: onboarding (Onboarding), payroll (Payroll)"],
+        },
+      ]);
+
+      const bySlots = yield* clientWith(directoryOverMcp(automationsAnswering([], templates)));
+      yield* bySlots("POST", "/api/types", { name: "person", schema: personSchema });
+      yield* bySlots("POST", "/api/types/person/entities", {
+        id: "ada",
+        data: { name: "Ada", email: "a@b.co" },
+      });
+      const slotted = yield* bySlots("DELETE", "/api/types/person?expectedVersion=1");
+      expect(slotted.status).toBe(409);
+      expect(slotted.body.reasons).toEqual([
+        "it has 1 live entity",
+        "template slots point to it: welcome.hire",
+      ]);
+      yield* bySlots("DELETE", "/api/entities/ada");
+      expect((yield* bySlots("DELETE", "/api/types/person")).body.reasons).toEqual([
+        "template slots point to it: welcome.hire",
+      ]);
+      expect((yield* bySlots("GET", "/api/types/person")).status).toBe(200);
+
+      // Unused by automations, or automations unavailable: only the store decides.
+      const unused = yield* clientWith(directoryOverMcp(automationsAnswering([], [])));
+      yield* unused("POST", "/api/types", { name: "person", schema: personSchema });
+      expect((yield* unused("DELETE", "/api/types/person")).body).toEqual({ name: "person" });
+      const offline = yield* makeClient;
+      yield* offline("POST", "/api/types", { name: "person", schema: personSchema });
+      expect((yield* offline("DELETE", "/api/types/person")).body).toEqual({ name: "person" });
+    }),
+  );
+
+  it.effect("dry-runs a type delete with every reason and the consumers", () =>
+    Effect.gen(function* () {
+      const call = yield* clientWith(
+        directoryOverMcp(automationsAnswering(automations, templates)),
+      );
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      yield* call("POST", "/api/types", {
+        name: "post",
+        schema: { fields: { author: { type: "link", to: "person" } } },
+      });
+      const check = yield* call("POST", "/api/types/person/delete/check");
+      expect(check.status).toBe(200);
+      expect(check.body).toMatchObject({
+        type: "person",
+        latestVersion: 1,
+        reasons: [
+          "post's latest schema (v1) links to it",
+          "automations use it: onboarding (Onboarding), payroll (Payroll)",
+          "template slots point to it: welcome.hire",
+        ],
+        consumers: { type: "person", automations: { status: "checked" } },
+      });
+      expect(check.body.consumers).toEqual(
+        (yield* call("GET", "/api/types/person/consumers")).body,
+      );
+      const withBody = yield* call("POST", "/api/types/person/delete/check", {
+        expectedVersion: 1,
+      });
+      expect(withBody.body.reasons).toEqual(check.body.reasons);
+      const stale = yield* call("POST", "/api/types/person/delete/check", { expectedVersion: 2 });
+      expect([stale.status, stale.body.code, stale.body.currentVersion]).toEqual([
+        409,
+        "VersionConflict",
+        1,
+      ]);
+      expect((yield* call("POST", "/api/types/person/delete/check?expectedVersion=2")).status).toBe(
+        409,
+      );
+      expect((yield* call("POST", "/api/types/nope/delete/check")).status).toBe(404);
+      // A dry run deletes nothing.
+      expect((yield* call("GET", "/api/types/person")).status).toBe(200);
+
+      const offline = yield* makeClient;
+      yield* offline("POST", "/api/types", { name: "person", schema: personSchema });
+      expect((yield* offline("POST", "/api/types/person/delete/check")).body).toEqual({
+        type: "person",
+        latestVersion: 1,
+        reasons: [],
+        consumers: {
+          type: "person",
+          automations: { status: "unavailable", reason: NOT_CONNECTED },
+        },
+      });
+    }),
+  );
+});
+
+// ── A fake automations, answering its MCP tools as its `mcp` RPC would ──
+
+const automations = [
+  {
+    id: "payroll",
+    name: "Payroll",
+    updatedAt: 1,
+    activeRuns: [],
+    saved: { trigger: { kind: "schedule", cron: "0 9 1 * *", entity: "person" }, nextRunAt: 2 },
+  },
+  {
+    id: "onboarding",
+    name: "Onboarding",
+    updatedAt: 1,
+    activeRuns: [],
+    saved: {
+      trigger: {
+        kind: "entity",
+        entity: "person",
+        fields: ["start"],
+        when: { ref: "x", op: "exists" },
+      },
+    },
+  },
+  {
+    id: "audit",
+    name: "Audit",
+    updatedAt: 1,
+    activeRuns: [],
+    saved: { trigger: { kind: "event", event: "entity.deleted" } },
+  },
+  { id: "stuck", name: "Stuck", updatedAt: 1, activeRuns: [], error: "It didn't answer" },
+  { id: "draft", name: "Draft", updatedAt: 1, activeRuns: [] },
+];
+
+const templates = [
+  {
+    name: "welcome",
+    label: "Welcome email",
+    description: "For new hires",
+    slots: [{ name: "hire", label: "Hire", type: "ref", to: "person" }],
+    content: { body: "Hi {{hire.name}}" },
+  },
+];
+
+const automationsAnswering = (
+  listed: ReadonlyArray<unknown>,
+  templateList: ReadonlyArray<unknown>,
+): McpTransport => ({
+  send: (message) =>
+    Effect.sync(() => {
+      const { id, params } = message as { id: number; params: { name: string } };
+      const structuredContent =
+        params.name === "list_automations" ? { automations: listed } : { templates: templateList };
+      return {
+        status: 200,
+        body: { jsonrpc: "2.0", id, result: { content: [], structuredContent, isError: false } },
+      };
+    }),
 });

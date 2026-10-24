@@ -7,12 +7,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { apiRoutes } from "../../api.ts";
 import { Identity } from "../../auth/identity.ts";
+import { AutomationsDirectory } from "../../consumers/directory.ts";
 import { ChangeDelivery, singleFlight } from "../../entity/changes.ts";
 import { EntityStore, VersionCache } from "../../entity/store.ts";
 import type { RpcResult } from "../../rpc/entityStoreRpc.ts";
 import { RPC_PRINCIPAL, RPC_WRITES, entityStoreRpc } from "../../rpc/entityStoreRpc.ts";
 import { AppInfo } from "../../service.ts";
 import { AccessApp, DEV_IDENTITY, isDev, teamDomain } from "./access.ts";
+import { bindAutomations } from "./automations.ts";
 import { d1SqlDatabase } from "./d1.ts";
 import { EntityDatabase } from "./database.ts";
 import { ChangesQueue, changeQueue } from "./queue.ts";
@@ -114,6 +116,8 @@ export default class Api extends Cloudflare.Worker<Api>()(
     // it run once more instead of each resending the same unsent changes.
     const writeFlush = singleFlight(flushChanges(WRITE_FLUSH_BATCHES));
     const afterWrite = execution.waitUntil(writeFlush);
+    // Automations' Api on prod only; elsewhere the directory says it isn't connected.
+    const automations = yield* bindAutomations;
     const env = yield* Cloudflare.Workers.WorkerEnvironment;
     // The env is only populated at runtime; build the verifier (and its key
     // cache) on first use and keep it for the isolate.
@@ -147,7 +151,12 @@ export default class Api extends Cloudflare.Worker<Api>()(
         return Identity.of({ principal });
       }),
     );
-    const requestServices = Layer.mergeAll(AppInfo.layer("Entity store"), store, identity);
+    const requestServices = Layer.mergeAll(
+      AppInfo.layer("Entity store"),
+      store,
+      identity,
+      Layer.sync(AutomationsDirectory, automations),
+    );
     // Finish backfilling large indexes, then deliver any changes a write's
     // flush didn't. Each backfill step and each flush is idempotent and
     // commits its own progress, so overlapping or retried runs are safe.

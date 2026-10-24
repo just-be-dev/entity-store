@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as HttpServerResponse from "effect/http/HttpServerResponse";
+import { checkTypeDelete, deleteType, typeConsumers } from "../consumers/application.ts";
 import type { StoreError } from "../entity/model.ts";
 import {
   AddVersionBody,
@@ -142,12 +143,31 @@ export const entityRoutes = Layer.mergeAll(
     "/api/types/:type",
     Effect.gen(function* () {
       const input = yield* optionalBody(DeleteTypeBody);
-      const store = yield* EntityStore;
+      // Refused while automations or template slots use the type (see consumers/application.ts).
       return json(
-        yield* store.deleteType(yield* pathParam("type"), {
+        yield* deleteType(yield* pathParam("type"), {
           expectedVersion: input?.expectedVersion ?? (yield* intParam("expectedVersion")),
         }),
       );
+    }),
+  ),
+  route(
+    "POST",
+    "/api/types/:type/delete/check",
+    Effect.gen(function* () {
+      const input = yield* optionalBody(DeleteTypeBody);
+      return json(
+        yield* checkTypeDelete(yield* pathParam("type"), {
+          expectedVersion: input?.expectedVersion ?? (yield* intParam("expectedVersion")),
+        }),
+      );
+    }),
+  ),
+  route(
+    "GET",
+    "/api/types/:type/consumers",
+    Effect.gen(function* () {
+      return json(yield* typeConsumers(yield* pathParam("type")));
     }),
   ),
   route(
