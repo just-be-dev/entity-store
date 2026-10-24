@@ -1,5 +1,6 @@
 import { Runtime } from "foldkit";
 import { init, Message, Model, update, view } from "./main.ts";
+import { subscriptions } from "./subscription.ts";
 import "@fontsource-variable/inter";
 import "@fontsource/ibm-plex-mono/400.css";
 import "./styles.css";
@@ -9,6 +10,7 @@ const application = Runtime.makeApplication({
   init,
   update,
   view,
+  subscriptions,
   container: document.getElementById("root"),
   routing: {
     onUrlRequest: (request) => Message.ClickedLink({ request }),

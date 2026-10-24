@@ -94,6 +94,13 @@ export const Message = defineMessageUnion({
 });
 export type Message = typeof Message.Type;
 
+// OUT MESSAGE
+
+export const OutMessage = defineMessageUnion({
+  CreatedType: { name: Schema.String },
+});
+export type OutMessage = typeof OutMessage.Type;
+
 // COMMAND
 
 export const FetchTypes = Command.define("FetchTypes", {
@@ -150,7 +157,7 @@ export const init = (): Update.Return<Model, Message> => ({
 const isSubmitting = (submission: Submission) => submission._tag === "Submitting";
 
 export const update = (model: Model, message: Message) =>
-  Message.match<Update.Return<Model, Message>>(message, {
+  Message.match<Update.ReturnWithOutMessage<Model, Message, OutMessage>>(message, {
     SucceededFetchTypes: ({ items }) => ({
       model: modifyFields(model, { types: () => Types.Loaded({ items }) }),
     }),
@@ -214,6 +221,7 @@ export const update = (model: Model, message: Message) =>
     SucceededCreateType: ({ name }) => ({
       model,
       commands: [NavigateToType({ name })],
+      outMessage: OutMessage.CreatedType({ name }),
     }),
     FailedCreateType: ({ failure }) => ({
       model: modifyFields(model, { submission: () => Submission.Failed({ failure }) }),

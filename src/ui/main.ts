@@ -8,8 +8,10 @@ import { UrlRequest, load, pushUrl } from "foldkit/navigation";
 import { defineTaggedUnion } from "foldkit/schema";
 import { modifyFields } from "foldkit/struct";
 import { Url, toString as urlToString } from "foldkit/url";
+import { apiUrl, getJson } from "@/api";
 import { buttonClass } from "@/components/ui/button";
 import { pageHeader } from "@/components/layout";
+import { ApiFailure, TypeList as TypeListResponse } from "@/domain/entityStore";
 import { EntityDetail, NewVersion, TypeDetail, TypeIndexes, TypeList } from "./page/index.ts";
 import { AppRoute, href, urlToAppRoute } from "./route.ts";
 
@@ -25,7 +27,15 @@ export const Page = defineTaggedUnion({
 });
 export type Page = typeof Page.Type;
 
-export const Model = Schema.Struct({ page: Page });
+/** The type names the hub's sidebar lists, fetched once for every page. */
+export const NavTypes = defineTaggedUnion({
+  Loading: {},
+  Failed: { failure: ApiFailure },
+  Loaded: { names: Schema.Array(Schema.String) },
+});
+export type NavTypes = typeof NavTypes.Type;
+
+export const Model = Schema.Struct({ page: Page, navTypes: NavTypes });
 export type Model = typeof Model.Type;
 
 // MESSAGE
@@ -35,6 +45,8 @@ export const Message = defineMessageUnion({
   ChangedUrl: { url: Url },
   CompletedNavigateInternal: {},
   CompletedLoadExternal: {},
+  SucceededFetchNavTypes: { names: Schema.Array(Schema.String) },
+  FailedFetchNavTypes: { failure: ApiFailure },
   GotTypeListMessage: { message: TypeList.Message },
   GotTypeDetailMessage: { message: TypeDetail.Message },
   GotNewVersionMessage: { message: NewVersion.Message },
@@ -57,49 +69,73 @@ export const LoadExternal = Command.define("LoadExternal", {
   execute: ({ href: url }) => load(url).pipe(Effect.as(Message.CompletedLoadExternal())),
 });
 
+export const FetchNavTypes = Command.define("FetchNavTypes", {
+  messages: [Message.SucceededFetchNavTypes, Message.FailedFetchNavTypes],
+  execute: getJson(apiUrl("types"), TypeListResponse).pipe(
+    Effect.map(({ items }) =>
+      Message.SucceededFetchNavTypes({ names: items.map((type) => type.name) }),
+    ),
+    Effect.catch((failure) => Effect.succeed(Message.FailedFetchNavTypes({ failure }))),
+  ),
+});
+
 // INIT
 
 type UpdateReturn = Update.Return<Model, Message>;
-
-const toModel = (page: Page): Model => Model.make({ page });
+type PageReturn = Update.Return<Page, Message>;
 
 /** Every route starts its page afresh, with that page's initial Commands. */
-export const pageForRoute = (route: AppRoute): UpdateReturn =>
-  AppRoute.match<UpdateReturn>(route, {
+export const pageForRoute = (route: AppRoute): PageReturn =>
+  AppRoute.match<PageReturn>(route, {
     TypeList: () =>
       Update.foldChildInit(TypeList.init(), {
-        toParentModel: (model) => toModel(Page.TypeList({ model })),
+        toParentModel: (model) => Page.TypeList({ model }),
         toParentMessage: (message) => Message.GotTypeListMessage({ message }),
       }),
     TypeDetail: ({ name }) =>
       Update.foldChildInit(TypeDetail.init(name), {
-        toParentModel: (model) => toModel(Page.TypeDetail({ model })),
+        toParentModel: (model) => Page.TypeDetail({ model }),
         toParentMessage: (message) => Message.GotTypeDetailMessage({ message }),
       }),
     NewVersion: ({ name }) =>
       Update.foldChildInit(NewVersion.init(name), {
-        toParentModel: (model) => toModel(Page.NewVersion({ model })),
+        toParentModel: (model) => Page.NewVersion({ model }),
         toParentMessage: (message) => Message.GotNewVersionMessage({ message }),
       }),
     TypeIndexes: ({ name }) =>
       Update.foldChildInit(TypeIndexes.init(name), {
-        toParentModel: (model) => toModel(Page.TypeIndexes({ model })),
+        toParentModel: (model) => Page.TypeIndexes({ model }),
         toParentMessage: (message) => Message.GotTypeIndexesMessage({ message }),
       }),
     EntityDetail: ({ id }) =>
       Update.foldChildInit(EntityDetail.init(id), {
-        toParentModel: (model) => toModel(Page.EntityDetail({ model })),
+        toParentModel: (model) => Page.EntityDetail({ model }),
         toParentMessage: (message) => Message.GotEntityDetailMessage({ message }),
       }),
-    NotFound: ({ path }) => ({ model: toModel(Page.NotFound({ path })) }),
+    NotFound: ({ path }) => ({ model: Page.NotFound({ path }) }),
   });
 
-export const init = (url: Url): UpdateReturn => pageForRoute(urlToAppRoute(url));
+export const init = (url: Url): UpdateReturn => {
+  const routed = pageForRoute(urlToAppRoute(url));
+  return {
+    model: Model.make({ page: routed.model, navTypes: NavTypes.Loading() }),
+    commands: [...(routed.commands ?? []), FetchNavTypes()],
+  };
+};
 
 // UPDATE
 
 const foldTypeList = Update.foldChild({
   update: TypeList.update,
+  foldOutMessage: (outMessage) =>
+    TypeList.OutMessage.match(outMessage, {
+      CreatedType:
+        () =>
+        (stepModel: Model): UpdateReturn => ({
+          model: stepModel,
+          commands: [FetchNavTypes()],
+        }),
+    }),
   read: (model: Model) =>
     Page.matchOrElse(model.page, { TypeList: ({ model: page }) => Option.some(page) }, () =>
       Option.none(),
@@ -163,9 +199,21 @@ export const update = (model: Model, message: Message) =>
         }),
         External: ({ href: url }) => ({ model, commands: [LoadExternal({ href: url })] }),
       }),
-    ChangedUrl: ({ url }) => pageForRoute(urlToAppRoute(url)),
+    ChangedUrl: ({ url }) => {
+      const routed = pageForRoute(urlToAppRoute(url));
+      return {
+        model: modifyFields(model, { page: () => routed.model }),
+        commands: routed.commands,
+      };
+    },
     CompletedNavigateInternal: () => ({ model }),
     CompletedLoadExternal: () => ({ model }),
+    SucceededFetchNavTypes: ({ names }) => ({
+      model: modifyFields(model, { navTypes: () => NavTypes.Loaded({ names }) }),
+    }),
+    FailedFetchNavTypes: ({ failure }) => ({
+      model: modifyFields(model, { navTypes: () => NavTypes.Failed({ failure }) }),
+    }),
     GotTypeListMessage: ({ message: pageMessage }) => foldTypeList(model, pageMessage),
     GotTypeDetailMessage: ({ message: pageMessage }) => foldTypeDetail(model, pageMessage),
     GotNewVersionMessage: ({ message: pageMessage }) => foldNewVersion(model, pageMessage),
@@ -237,40 +285,39 @@ const pageView = (page: Page, h: HtmlBuilder<Message>): Html =>
     NotFound: ({ path }) => notFoundView(path, h),
   });
 
+/** The panel header's label: where the open page sits. */
+const headerTitle = (page: Page): string =>
+  Page.match(page, {
+    TypeList: () => "Entity types",
+    TypeDetail: ({ model }) => model.name,
+    NewVersion: ({ model }) => `${model.name} · New version`,
+    TypeIndexes: ({ model }) => `${model.name} · Indexes`,
+    EntityDetail: ({ model }) => model.id,
+    NotFound: () => "Not found",
+  });
+
+/**
+ * The white panel beside the hub's sidebar, as in the platform's other apps: a slim header over
+ * the page. The hub shell draws the sidebar, the app's name and its navigation.
+ */
 export const view = (model: Model, h: HtmlBuilder<Message>): Document => ({
   title: title(model.page),
   body: h.div(
-    [h.Class("min-h-screen")],
+    [h.Class("flex min-h-full flex-col bg-background lg:h-full")],
     [
       h.header(
-        [h.Class("border-b border-border bg-card")],
+        [h.Class("flex h-12 shrink-0 items-center gap-4 border-b px-4")],
         [
-          h.nav(
-            [
-              h.Class("mx-auto flex max-w-6xl items-center gap-4 px-4 py-3 sm:px-6"),
-              h.AriaLabel("Main"),
-            ],
-            [
-              h.a(
-                [
-                  h.Href(href(AppRoute.TypeList())),
-                  h.Class("font-mono text-sm font-semibold tracking-tight"),
-                ],
-                ["entity-store"],
-              ),
-              h.a(
-                [
-                  h.Href(href(AppRoute.TypeList())),
-                  h.Class("text-sm text-muted-foreground hover:text-foreground"),
-                  ...(model.page._tag === "TypeList" ? [h.AriaCurrent("page")] : []),
-                ],
-                ["Types"],
-              ),
-            ],
+          h.div(
+            [h.Class("truncate text-sm font-medium tracking-tight")],
+            [headerTitle(model.page)],
           ),
         ],
       ),
-      h.main([h.Class("mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8")], [pageView(model.page, h)]),
+      h.main(
+        [h.Class("flex-1 px-4 py-5 sm:px-6 sm:py-6 lg:min-h-0 lg:overflow-y-auto")],
+        [h.div([h.Class("max-w-6xl")], [pageView(model.page, h)])],
+      ),
     ],
   ),
 });

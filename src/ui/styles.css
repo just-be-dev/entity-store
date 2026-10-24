@@ -34,6 +34,21 @@
   }
 }
 
+/* The palette from the automations studio, as the platform's other apps carry it: a white panel
+   beside the hub's #fafafa sidebar, Radix sand for quiet surfaces, a near-black primary, Radix
+   blue for focus rings. Dark mode follows the OS preference; `data-theme` on <html> overrides it. */
+
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:not([data-theme="light"]):not([data-theme="light"] *)) {
+      @slot;
+    }
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -47,10 +62,10 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-destructive: var(--destructive);
   --color-border: var(--border);
-  --color-input: var(--border);
-  --color-ring: var(--primary);
-  --color-sidebar: var(--background);
-  --color-hover: var(--muted);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-hover: var(--hover);
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --font-heading: var(--font-sans);
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
@@ -60,34 +75,50 @@
 
 :root {
   --radius: 0.625rem;
-  --background: #f8fafc;
-  --foreground: #0f172a;
-  --card: #fff;
-  --primary: #1d4ed8;
+  --background: #fff;
+  --foreground: #0a0a0a;
+  --card: var(--background);
+  --primary: #171717;
   --primary-foreground: #fff;
-  --secondary: var(--muted);
-  --muted: #e2e8f0;
-  --muted-foreground: #475569;
-  --destructive: #dc2626;
-  --border: #cbd5e1;
-}
+  --secondary: #f1f0ef;
+  --muted: #f1f0ef;
+  --muted-foreground: #0a0a0a99;
+  --destructive: #e5484d;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #0090ff;
+  --sidebar: #fafafa;
+  --hover: #0000000d;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0f172a;
-    --foreground: #f8fafc;
-    --card: #1e293b;
-    --primary: #93c5fd;
-    --primary-foreground: #0f172a;
-    --muted: #334155;
-    --muted-foreground: #cbd5e1;
-    --destructive: #f87171;
-    --border: #475569;
+  color-scheme: light;
+
+  @variant dark {
+    color-scheme: dark;
+
+    --background: #292929;
+    --foreground: #fafafa;
+    --primary: #fafafa;
+    --primary-foreground: #171717;
+    --secondary: #222221;
+    --muted: #222221;
+    --muted-foreground: #a1a1a1;
+    --border: #ffffff1a;
+    --input: #ffffff26;
+    --sidebar: #1f1f1f;
+    --hover: #ffffff1a;
   }
 }
 
 @layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
   body {
-    @apply bg-background font-sans text-foreground;
+    @apply bg-background font-sans text-foreground antialiased;
   }
 }

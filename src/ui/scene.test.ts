@@ -13,14 +13,23 @@ const url = (pathname: string) => ({
 });
 
 describe("root", () => {
-  it("renders the active page inside the app shell", () => {
+  it("renders the active page in the panel, leaving navigation to the hub's sidebar", () => {
     scene(
       { update, view },
       given(init(url("/")).model),
-      expect(role("navigation", { name: "Main" })).toExist(),
-      expect(role("link", { name: "Types" })).toHaveAttr("aria-current", "page"),
+      expect(role("banner")).toContainText("Entity types"),
+      expect(role("navigation")).toBeAbsent(),
+
       expect(role("heading", { name: "Entity types" })).toExist(),
       expect(text("Loading types…")).toExist(),
+    );
+  });
+
+  it("names the open page in the panel header", () => {
+    scene(
+      { update, view },
+      given(init(url("/types/person/indexes")).model),
+      expect(role("banner")).toHaveText("person · Indexes"),
     );
   });
 

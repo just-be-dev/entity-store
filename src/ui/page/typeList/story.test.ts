@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Option from "effect/Option";
-import { Command, given, message, model, story } from "foldkit/story";
+import { Command, expectOutMessage, given, message, model, story } from "foldkit/story";
 import { ApiFailure } from "@/domain/entityStore";
 import {
   CheckSchema,
@@ -9,6 +9,7 @@ import {
   init,
   Message,
   NavigateToType,
+  OutMessage,
   Submission,
   update,
 } from "./main.ts";
@@ -79,6 +80,7 @@ describe("type list", () => {
       model((m) => expect(m.submission._tag).toBe("Submitting")),
       Command.expectHas(CreateType({ name: "person", description: "", schema: { fields: {} } })),
       Command.resolve(CreateType, Message.SucceededCreateType({ name: "person" })),
+      expectOutMessage(OutMessage.CreatedType({ name: "person" })),
       Command.expectHas(NavigateToType({ name: "person" })),
       Command.resolve(NavigateToType, Message.CompletedNavigateToType()),
     );

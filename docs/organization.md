@@ -34,6 +34,7 @@ src/
     main.ts                        root init, plus all definitions in a small app
     model.ts / message.ts          root Schema state and Messages
     command.ts / route.ts          root effects and URL mapping
+    hub-nav.ts / subscription.ts   what the hub shell's sidebar lists, and publishing it
     update/ / view/                split by area as the root grows
     page/<page>/                   page Submodels and their tests
     domain/                        pure UI/domain transformations
