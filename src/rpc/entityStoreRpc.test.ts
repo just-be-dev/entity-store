@@ -134,6 +134,41 @@ describe("EntityStoreRpc", () => {
     }).pipe(Effect.provide(layer())),
   );
 
+  it.effect("takes expectedVersion on createVersion, checkVersion and deleteType", () =>
+    Effect.gen(function* () {
+      yield* ok(rpc.createType({ name: "person", schema: person }));
+      const v2 = {
+        schema: { fields: { name: { type: "string" }, age: { type: "number", optional: true } } },
+        lens: { ops: [{ op: "add", field: "age" }] },
+      };
+      expect(yield* ok(rpc.checkVersion("person", { ...v2, expectedVersion: 1 }))).toMatchObject({
+        from: 1,
+        to: 2,
+      });
+      yield* ok(rpc.createVersion("person", { ...v2, expectedVersion: 1 }));
+      const conflict = {
+        code: "VersionConflict",
+        message: "person is at v2, not v1; reload and try again",
+        type: "person",
+        expected: 1,
+        currentVersion: 2,
+      };
+      expect(yield* err(rpc.createVersion("person", { ...v2, expectedVersion: 1 }))).toEqual(
+        conflict,
+      );
+      expect(yield* err(rpc.checkVersion("person", { ...v2, expectedVersion: 1 }))).toEqual(
+        conflict,
+      );
+      expect(yield* err(rpc.deleteType("person", { expectedVersion: 1 }))).toEqual(conflict);
+      expect((yield* err(rpc.deleteType("person", { expectedVersion: "2" }))).code).toBe(
+        "BadRequest",
+      );
+      expect(yield* ok(rpc.deleteType("person", { expectedVersion: 2 }))).toEqual({
+        name: "person",
+      });
+    }).pipe(Effect.provide(layer())),
+  );
+
   it.effect("rejects malformed arguments as BadRequest", () =>
     Effect.gen(function* () {
       yield* ok(rpc.createType({ name: "person", schema: person }));

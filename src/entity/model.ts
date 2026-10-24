@@ -244,10 +244,15 @@ export class VersionNotFound extends Schema.TaggedError<VersionNotFound>()("Vers
   version: Schema.Finite,
 }) {}
 
-/** Someone else added a version first; re-read the type and try again. */
+/**
+ * The type isn't at the version the writer read (`expected`): someone else
+ * added a version first. `currentVersion` is its latest version when the
+ * conflict was found, if known. Re-read the type and try again.
+ */
 export class VersionConflict extends Schema.TaggedError<VersionConflict>()("VersionConflict", {
   type: Schema.String,
   expected: Schema.Finite,
+  currentVersion: Schema.optionalKey(Schema.Finite),
 }) {}
 
 export class InvalidSchema extends Schema.TaggedError<InvalidSchema>()("InvalidSchema", {

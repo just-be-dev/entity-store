@@ -12,9 +12,10 @@ All HTTP routes live under `/api` and need a verified principal (Cloudflare Acce
 | 404    | `TypeNotFound`, `VersionNotFound`, `EntityNotFound`, `RevisionNotFound`,             |
 |        | `IndexNotFound`, `ChangeNotFound`                                                    |
 | 409    | `TypeAlreadyExists`, `TypeInUse` (`type`, `reasons`), `EntityAlreadyExists`,         |
-|        | `EntityTypeMismatch` (`id`, `type`, `actual`), `VersionConflict`, `RevConflict`      |
-|        | (`currentRev`), `EntityLinked` (`linkedFrom`), `IndexAlreadyExists`,                 |
-|        | `IndexNotReady` (`state`), `UniqueViolation` (`conflicts`)                           |
+|        | `EntityTypeMismatch` (`id`, `type`, `actual`), `VersionConflict` (`type`,            |
+|        | `expected`, `currentVersion?`), `RevConflict` (`currentRev`), `EntityLinked`         |
+|        | (`linkedFrom`), `IndexAlreadyExists`, `IndexNotReady` (`state`), `UniqueViolation`   |
+|        | (`conflicts`)                                                                        |
 | 410    | `EntityDeleted` (`rev` = the delete revision)                                        |
 | 413    | `BadRequest` (body too large)                                                        |
 | 422    | `InvalidSchema`/`InvalidLens` (`issues`), `LensCheckFailed` (`report`),              |
@@ -24,15 +25,15 @@ All HTTP routes live under `/api` and need a verified principal (Cloudflare Acce
 
 ## Entity types and schema versions
 
-| Method & path                          | Body / query                      | Returns                                 |
-| -------------------------------------- | --------------------------------- | --------------------------------------- |
-| `GET /api/types`                       |                                   | `{ items: TypeSummary[] }`              |
-| `POST /api/types`                      | `{ name, description?, schema }`  | `201 TypeInfo` (version 1)              |
-| `GET /api/types/:type`                 |                                   | `TypeInfo` (all versions, oldest first) |
-| `DELETE /api/types/:type`              |                                   | `{ name }`                              |
-| `GET /api/types/:type/versions/:v`     |                                   | `VersionInfo & { jsonSchema }`          |
-| `POST /api/types/:type/versions/check` | `{ schema, lens, samples? }`      | `{ from, to, report: LensReport }`      |
-| `POST /api/types/:type/versions`       | `{ schema, lens, note?, force? }` | `201 { version: VersionInfo, report }`  |
+| Method & path                          | Body / query                                        | Returns                                 |
+| -------------------------------------- | --------------------------------------------------- | --------------------------------------- |
+| `GET /api/types`                       |                                                     | `{ items: TypeSummary[] }`              |
+| `POST /api/types`                      | `{ name, description?, schema }`                    | `201 TypeInfo` (version 1)              |
+| `GET /api/types/:type`                 |                                                     | `TypeInfo` (all versions, oldest first) |
+| `DELETE /api/types/:type`              | `?expectedVersion`, or `{ expectedVersion? }`       | `{ name }`                              |
+| `GET /api/types/:type/versions/:v`     |                                                     | `VersionInfo & { jsonSchema }`          |
+| `POST /api/types/:type/versions/check` | `{ schema, lens, samples?, expectedVersion? }`      | `{ from, to, report: LensReport }`      |
+| `POST /api/types/:type/versions`       | `{ schema, lens, note?, force?, expectedVersion? }` | `201 { version: VersionInfo, report }`  |
 
 ```ts
 type TypeSummary = { name; description; latestVersion; createdAt; updatedAt };
@@ -46,6 +47,16 @@ deleted entities, and their revisions and changes. It's refused with
 `"post's latest schema (v2) links to it"`) while the type has live entities
 or another type's latest schema links to it. A type can then be created
 again under the same name, starting from v1.
+
+`expectedVersion` is the type's latest version as the client read it. On
+`versions` and `versions/check` it's the version the lens goes from; on
+`DELETE` it's the version the person saw before confirming. Given, a type at
+any other latest version fails with `409 VersionConflict`
+(`{ type, expected, currentVersion }`, `currentVersion` being the latest
+version when the conflict was found), before the lens is checked. It's also
+enforced in the write itself, so a version added between the check and the
+write fails it the same way. Omitted, a version goes from whatever is latest
+when it's saved, and a delete doesn't care which version it removes.
 
 `check` is a dry run: it validates the schema and lens and property-checks the
 lens (random old-version documents must lens into valid new documents and vice
@@ -216,25 +227,25 @@ Arguments that don't decode are `BadRequest`, and unexpected failures are
 `StorageFailure`. Writes flush the change feed after they commit, as HTTP
 writes do.
 
-| Method                          | Input                                        | Value                                  |
-| ------------------------------- | -------------------------------------------- | -------------------------------------- |
-| `listTypes()`                   |                                              | `TypeSummary[]`                        |
-| `getType(name)`                 |                                              | `TypeInfo` (all versions)              |
-| `createType(input)`             | `{ name, description?, schema }`             | `TypeInfo`                             |
-| `checkVersion(type, input)`     | `{ schema, lens, samples? }`                 | `{ from, to, report }`                 |
-| `createVersion(type, input)`    | `{ schema, lens, note?, force? }`            | `{ version: VersionInfo, report }`     |
-| `deleteType(name)`              |                                              | `{ name }`                             |
-| `listEntities(type, options?)`  | `{ version?, cursor?, limit?, index?, eq? }` | `EntityPage`                           |
-| `getEntity(id, options?)`       | `{ version?, rev? }`                         | `Entity`                               |
-| `createEntity(type, input)`     | `{ id?, version?, data, meta? }`             | `Entity`                               |
-| `replaceEntity(id, input)`      | `{ version?, data, expectedRev?, meta? }`    | `Entity`                               |
-| `patchEntity(id, input)`        | `{ version?, patch, expectedRev?, meta? }`   | `Entity`                               |
-| `upsertEntity(type, id, input)` | `{ version?, patch, expectedRev?, meta? }`   | `{ entity, created }`                  |
-| `checkEntity(type, id, input)`  | `{ version?, patch }`                        | `{ data, version, created }`           |
-| `getBacklinks(id, options?)`    | `{ cursor?, limit? }`                        | `BacklinkPage`                         |
-| `deleteEntity(id, options?)`    | `{ expectedRev?, meta? }`                    | `{ id, rev }`                          |
-| `getChange(id, rev, options?)`  | `{ version? }`                               | `Change`                               |
-| `listChanges(options?)`         | `{ after?, limit? }` (≤ 200)                 | `{ items: ChangeEvent[], nextAfter? }` |
+| Method                          | Input                                               | Value                                  |
+| ------------------------------- | --------------------------------------------------- | -------------------------------------- |
+| `listTypes()`                   |                                                     | `TypeSummary[]`                        |
+| `getType(name)`                 |                                                     | `TypeInfo` (all versions)              |
+| `createType(input)`             | `{ name, description?, schema }`                    | `TypeInfo`                             |
+| `checkVersion(type, input)`     | `{ schema, lens, samples?, expectedVersion? }`      | `{ from, to, report }`                 |
+| `createVersion(type, input)`    | `{ schema, lens, note?, force?, expectedVersion? }` | `{ version: VersionInfo, report }`     |
+| `deleteType(name, options?)`    | `{ expectedVersion? }`                              | `{ name }`                             |
+| `listEntities(type, options?)`  | `{ version?, cursor?, limit?, index?, eq? }`        | `EntityPage`                           |
+| `getEntity(id, options?)`       | `{ version?, rev? }`                                | `Entity`                               |
+| `createEntity(type, input)`     | `{ id?, version?, data, meta? }`                    | `Entity`                               |
+| `replaceEntity(id, input)`      | `{ version?, data, expectedRev?, meta? }`           | `Entity`                               |
+| `patchEntity(id, input)`        | `{ version?, patch, expectedRev?, meta? }`          | `Entity`                               |
+| `upsertEntity(type, id, input)` | `{ version?, patch, expectedRev?, meta? }`          | `{ entity, created }`                  |
+| `checkEntity(type, id, input)`  | `{ version?, patch }`                               | `{ data, version, created }`           |
+| `getBacklinks(id, options?)`    | `{ cursor?, limit? }`                               | `BacklinkPage`                         |
+| `deleteEntity(id, options?)`    | `{ expectedRev?, meta? }`                           | `{ id, rev }`                          |
+| `getChange(id, rev, options?)`  | `{ version? }`                                      | `Change`                               |
+| `listChanges(options?)`         | `{ after?, limit? }` (≤ 200)                        | `{ items: ChangeEvent[], nextAfter? }` |
 
 `EntityPage` is `{ items: Entity[], failures, nextCursor? }`, and
 `BacklinkPage` is `{ items: Backlink[], nextCursor? }`, as over HTTP.

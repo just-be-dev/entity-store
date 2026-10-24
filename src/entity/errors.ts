@@ -28,7 +28,9 @@ const messageOf = (error: StoreError): string => {
     case "VersionNotFound":
       return `${error.type} has no version ${error.version}`;
     case "VersionConflict":
-      return `Another version of ${error.type} was added first; reload and try again`;
+      return error.currentVersion === undefined
+        ? `Another version of ${error.type} was added first; reload and try again`
+        : `${error.type} is at v${error.currentVersion}, not v${error.expected}; reload and try again`;
     case "InvalidSchema":
       return "The schema definition is invalid";
     case "InvalidLens":
@@ -106,6 +108,12 @@ const detailsOf = (error: StoreError): Record<string, unknown> => {
       return { type: error.type, reasons: error.reasons };
     case "EntityTypeMismatch":
       return { id: error.id, type: error.type, actual: error.actual };
+    case "VersionConflict":
+      return {
+        type: error.type,
+        expected: error.expected,
+        ...(error.currentVersion === undefined ? {} : { currentVersion: error.currentVersion }),
+      };
     default:
       return {};
   }

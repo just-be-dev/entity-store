@@ -12,6 +12,7 @@ import {
   CreateEntityBody,
   CreateTypeBody,
   DeleteBody,
+  DeleteTypeBody,
   PatchBody,
   ReplaceBody,
   UpsertBody,
@@ -140,8 +141,13 @@ export const entityRoutes = Layer.mergeAll(
     "DELETE",
     "/api/types/:type",
     Effect.gen(function* () {
+      const input = yield* optionalBody(DeleteTypeBody);
       const store = yield* EntityStore;
-      return json(yield* store.deleteType(yield* pathParam("type")));
+      return json(
+        yield* store.deleteType(yield* pathParam("type"), {
+          expectedVersion: input?.expectedVersion ?? (yield* intParam("expectedVersion")),
+        }),
+      );
     }),
   ),
   route(

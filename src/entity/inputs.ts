@@ -13,9 +13,16 @@ export const CreateTypeBody = Schema.Struct({
   schema: EntitySchema,
 });
 
+/**
+ * `expectedVersion` is the latest version the author read, which their lens
+ * goes from. Given, a type at another version fails with VersionConflict.
+ */
+const ExpectedVersion = Schema.optionalKey(Version);
+
 export const CheckVersionBody = Schema.Struct({
   schema: EntitySchema,
   lens: Lens,
+  expectedVersion: ExpectedVersion,
   samples: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 500 }))),
 });
 
@@ -24,7 +31,11 @@ export const AddVersionBody = Schema.Struct({
   lens: Lens,
   note: Schema.optionalKey(Note),
   force: Schema.optionalKey(Schema.Boolean),
+  expectedVersion: ExpectedVersion,
 });
+
+/** A type delete's optional body (or RPC options); `?expectedVersion` works too. */
+export const DeleteTypeBody = Schema.Struct({ expectedVersion: ExpectedVersion });
 
 // Writes name the version they speak, or omit it to write at the latest.
 export const CreateEntityBody = Schema.Struct({

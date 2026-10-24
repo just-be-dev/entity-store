@@ -180,6 +180,16 @@ export interface VersionInput {
   readonly note?: string | undefined;
   /** Create the version even if the lens check finds counterexamples. */
   readonly force?: boolean | undefined;
+  /**
+   * The latest version the author read, which the lens goes from. Given, a
+   * type at any other version fails with VersionConflict.
+   */
+  readonly expectedVersion?: number | undefined;
+}
+
+export interface DeleteTypeOptions {
+  /** Fail with VersionConflict unless the type's latest version is this one. */
+  readonly expectedVersion?: number | undefined;
 }
 
 export interface WriteOptions {
@@ -720,12 +730,36 @@ const makeEntityStore = Effect.gen(function* () {
     return { from, to, report };
   });
 
+  /** Fail with VersionConflict if the writer expected another latest version. */
+  const requireLatest = (name: string, latest: number, expected: number | undefined) =>
+    expected === undefined || expected === latest
+      ? Effect.void
+      : Effect.fail(new VersionConflict({ type: name, expected, currentVersion: latest }));
+
+  /** A VersionConflict found after a batch, with the type's latest version if it still exists. */
+  const conflictAfterBatch = Effect.fn("EntityStore.conflictAfterBatch")(function* (
+    name: string,
+    expected: number,
+  ) {
+    const current = yield* registry.typeState(name).pipe(
+      Effect.map((state) => state.summary.latestVersion),
+      Effect.catchTag("TypeNotFound", () => Effect.succeed(undefined)),
+    );
+    return new VersionConflict({
+      type: name,
+      expected,
+      ...(current === undefined ? {} : { currentVersion: current }),
+    });
+  });
+
   const checkNext = Effect.fn("EntityStore.checkNext")(function* (
     name: string,
     input: Omit<VersionInput, "force" | "note">,
     options?: { readonly samples?: number },
   ) {
     const { summary, incarnation } = yield* registry.typeState(name);
+    // Before the lens check: a lens written against another version isn't worth checking.
+    yield* requireLatest(name, summary.latestVersion, input.expectedVersion);
     const to = yield* definitionIssues(input.schema, name);
     const lens = compileLens(input.lens);
     if (Result.isFailure(lens)) {
@@ -781,10 +815,10 @@ const makeEntityStore = Effect.gen(function* () {
         ),
       ])
       .pipe(
-        Effect.mapError((error) =>
+        Effect.catch((error) =>
           error.constraint
-            ? new VersionConflict({ type: name, expected: checked.from })
-            : storageFailure(error),
+            ? Effect.flatMap(conflictAfterBatch(name, checked.from), Effect.fail)
+            : Effect.fail(storageFailure(error)),
         ),
       );
     if (results[1]?.changes !== 1) {
@@ -792,7 +826,7 @@ const makeEntityStore = Effect.gen(function* () {
       // insert above then failed on its primary key or matched nothing,
       // aborting or skipping both), or this type was deleted.
       yield* definitionIssues(input.schema, name);
-      return yield* new VersionConflict({ type: name, expected: checked.from });
+      return yield* yield* conflictAfterBatch(name, checked.from);
     }
     const info: VersionInfo = (yield* registry.version(name, checked.to)).info;
     return { version: info, report: checked.report };
@@ -1421,21 +1455,30 @@ const makeEntityStore = Effect.gen(function* () {
    * revisions and changes. Refused with TypeInUse while it has live entities
    * or another type's latest schema links to it. The type row is deleted
    * only if both still hold inside the batch, and everything else only if the
-   * type row is gone, so a concurrent create can't lose an entity.
+   * type row is gone, so a concurrent create can't lose an entity. With
+   * `expectedVersion`, a type at another latest version fails with
+   * VersionConflict, also when a version is added before the batch.
    */
-  const deleteType = Effect.fn("EntityStore.deleteType")(function* (name: string) {
-    yield* registry.typeState(name);
+  const deleteType = Effect.fn("EntityStore.deleteType")(function* (
+    name: string,
+    options?: DeleteTypeOptions,
+  ) {
+    const expected = options?.expectedVersion;
+    const { summary } = yield* registry.typeState(name);
+    yield* requireLatest(name, summary.latestVersion, expected);
     const reasons = yield* typeInUse(name);
     if (reasons.length > 0) {
       return yield* new TypeInUse({ type: name, reasons });
     }
     const gone = "NOT EXISTS (SELECT 1 FROM entity_types WHERE name = ?)";
     const ofType = "SELECT id FROM entities WHERE type = ?";
+    const atVersion = expected === undefined ? sql("1 = 1") : sql("latest_version = ?", expected);
     const results = yield* db
       .batch([
         sql(
-          `DELETE FROM entity_types WHERE name = ? AND NOT EXISTS (SELECT 1 FROM entities WHERE type = ? AND deleted = 0) AND NOT EXISTS (${linkingTypesQuery("1")})`,
+          `DELETE FROM entity_types WHERE name = ? AND ${atVersion.sql} AND NOT EXISTS (SELECT 1 FROM entities WHERE type = ? AND deleted = 0) AND NOT EXISTS (${linkingTypesQuery("1")})`,
           name,
+          ...atVersion.params,
           name,
           name,
           name,
@@ -1455,8 +1498,9 @@ const makeEntityStore = Effect.gen(function* () {
       ])
       .pipe(Effect.mapError(storageFailure));
     if (results[0]?.changes !== 1) {
-      // Deleted by someone else, or put to use since the check.
-      yield* registry.typeState(name);
+      // Deleted by someone else, given a new version, or put to use since the check.
+      const current = yield* registry.typeState(name);
+      yield* requireLatest(name, current.summary.latestVersion, expected);
       const now = yield* typeInUse(name);
       return yield* new TypeInUse({
         type: name,

@@ -11,6 +11,7 @@ import {
   CreateEntityBody,
   CreateTypeBody,
   DeleteBody,
+  DeleteTypeBody,
   PatchBody,
   ReplaceBody,
   UpsertBody,
@@ -194,12 +195,14 @@ export const entityStoreRpc = {
       }),
     ),
 
-  deleteType: (name: unknown) =>
+  /** Doesn't ask automations whether it uses the type: automations calls this itself. */
+  deleteType: (name: unknown, input?: unknown) =>
     run(
       "deleteType",
       Effect.gen(function* () {
         const store = yield* EntityStore;
-        return yield* store.deleteType(yield* decode(Schema.String, "type name", name));
+        const typeName = yield* decode(Schema.String, "type name", name);
+        return yield* store.deleteType(typeName, yield* options(DeleteTypeBody, input));
       }),
     ),
 

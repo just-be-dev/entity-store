@@ -112,6 +112,14 @@ re-checked inside the delete batch: the type row is deleted only if they
 still hold, and everything else only if the type row is gone. So an entity
 created concurrently is never lost.
 
+`deleteType(name, { expectedVersion })` also requires the type's latest
+version to be `expectedVersion`, the one the person saw. A different version
+fails with `VersionConflict`, before the in-use check, and the batch deletes
+the type row only `AND latest_version = expectedVersion`, so a version added
+between the check and the batch fails the delete the same way.
+`addVersion` and `checkVersion` take the same `expectedVersion`: the version
+the new lens goes from.
+
 Schema writes (`createType`, `addVersion`) re-check inside their batch that
 every type they link to still exists, so a `deleteType` that commits between
 the check and the write fails it with `InvalidSchema` rather than leaving a

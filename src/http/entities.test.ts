@@ -472,6 +472,62 @@ describe("entity HTTP API", () => {
     }),
   );
 
+  it.effect("takes expectedVersion on version writes and type deletes", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      const v2 = {
+        schema: {
+          fields: { ...personSchema.fields, nickname: { type: "string", optional: true } },
+        },
+        lens: { ops: [{ op: "add", field: "nickname" }] },
+      };
+      const checked = yield* call("POST", "/api/types/person/versions/check", {
+        ...v2,
+        expectedVersion: 1,
+      });
+      expect(checked.body).toMatchObject({ from: 1, to: 2, report: { ok: true } });
+      const added = yield* call("POST", "/api/types/person/versions", {
+        ...v2,
+        expectedVersion: 1,
+      });
+      expect(added.status).toBe(201);
+      expect(added.body.version.version).toBe(2);
+
+      const conflict = {
+        error: "person is at v2, not v1; reload and try again",
+        code: "VersionConflict",
+        type: "person",
+        expected: 1,
+        currentVersion: 2,
+      };
+      for (const path of ["/api/types/person/versions", "/api/types/person/versions/check"]) {
+        const stale = yield* call("POST", path, { ...v2, expectedVersion: 1 });
+        expect([path, stale.status, stale.body]).toEqual([path, 409, conflict]);
+      }
+      expect(
+        (yield* call("POST", "/api/types/person/versions", { ...v2, expectedVersion: 0 })).status,
+      ).toBe(400);
+
+      // DELETE takes it from the query or a JSON body.
+      const byQuery = yield* call("DELETE", "/api/types/person?expectedVersion=1");
+      expect([byQuery.status, byQuery.body]).toEqual([409, conflict]);
+      const byBody = yield* call("DELETE", "/api/types/person", { expectedVersion: 1 });
+      expect([byBody.status, byBody.body]).toEqual([409, conflict]);
+      expect((yield* call("DELETE", "/api/types/person?expectedVersion=x")).status).toBe(400);
+      expect((yield* call("DELETE", "/api/types/person", { expectedVersion: "2" })).status).toBe(
+        400,
+      );
+      expect((yield* call("GET", "/api/types/person")).body.latestVersion).toBe(2);
+      const deleted = yield* call("DELETE", "/api/types/person", { expectedVersion: 2 });
+      expect([deleted.status, deleted.body]).toEqual([200, { name: "person" }]);
+
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      const viaQuery = yield* call("DELETE", "/api/types/person?expectedVersion=1");
+      expect([viaQuery.status, viaQuery.body]).toEqual([200, { name: "person" }]);
+    }),
+  );
+
   it.effect("dry-runs an upsert without writing", () =>
     Effect.gen(function* () {
       const call = yield* makeClient;
