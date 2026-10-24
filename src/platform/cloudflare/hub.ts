@@ -4,6 +4,8 @@
  * Worker forwards `/_hub/*` to agents' `Embed` Worker, and `/_hub/api/*` to agents' API over RPC
  * (`platformFetch`) with the email Access admitted, so the assistant acts for the same person.
  *
+ * `index.html` also loads `/_hub/boot.js` synchronously in `<head>`, which reserves the sidebar before first paint.
+ *
  * Every deployed stage binds agents' prod, which owns the assistant (hub-bindings.ts); `alchemy
  * dev` binds nothing and the page simply has no shell.
  */
