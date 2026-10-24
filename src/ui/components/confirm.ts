@@ -229,6 +229,8 @@ export type ConfirmConfig<M> = Readonly<{
   maybeProposal: Option.Option<Proposal>;
   usage: Usage;
   submission: Submission;
+  /** A check still running before the write can be confirmed, such as who links to it. */
+  maybeChecking?: Option.Option<string>;
   onConfirm: M;
   toDialogMessage: (message: Dialog.Message) => M;
 }>;
@@ -249,6 +251,7 @@ export const confirmDialog = <M>(config: ConfirmConfig<M>, h: HtmlBuilder<M>): H
             onSome: (proposal) => {
               const isWorking = config.submission._tag === "Working";
               const isRefused = Array.isReadonlyArrayNonEmpty(proposal.refusals);
+              const maybeChecking = config.maybeChecking ?? Option.none();
               return [
                 Dialog.header(
                   {},
@@ -258,6 +261,10 @@ export const confirmDialog = <M>(config: ConfirmConfig<M>, h: HtmlBuilder<M>): H
                   ],
                   h,
                 ),
+                Option.match(maybeChecking, {
+                  onNone: () => h.empty,
+                  onSome: (checking) => statusText(checking, h),
+                }),
                 refusalsView(proposal.refusals, h),
                 detailsView(proposal.details, h),
                 Array.match(proposal.notes, {
@@ -290,7 +297,7 @@ export const confirmDialog = <M>(config: ConfirmConfig<M>, h: HtmlBuilder<M>): H
                         type: "button",
                         variant: proposal.isDestructive ? "destructive" : "default",
                         onClick: config.onConfirm,
-                        isDisabled: isWorking || isRefused,
+                        isDisabled: isWorking || isRefused || Option.isSome(maybeChecking),
                       },
                       isWorking ? "Working…" : proposal.confirmLabel,
                       h,

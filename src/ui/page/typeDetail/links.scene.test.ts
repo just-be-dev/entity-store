@@ -2,7 +2,7 @@ import { describe, it } from "@effect/vitest";
 import * as Option from "effect/Option";
 import { expect, given, role, scene, text, within } from "foldkit/scene";
 import { ada, post, postType } from "@/domain/entityStore.fixture";
-import { init, Message, update, view } from "./main.ts";
+import { init, Message, update, view } from "./index.ts";
 
 const loaded = [
   Message.SucceededFetchType({ info: postType }),
@@ -17,7 +17,8 @@ describe("type detail links", () => {
     scene(
       { update, view },
       given(loaded),
-      expect(within(role("list", { name: "Links" }), text("author →"))).toExist(),
+      expect(within(role("table", { name: "Entities" }), text("Notes"))).toExist(),
+      expect(role("list", { name: "reviewers links" })).toContainText("alan"),
       expect(role("link", { name: "ada" })).toHaveAttr("href", "/entities/ada"),
       expect(role("link", { name: "ada" })).toHaveAttr(
         "title",

@@ -2,7 +2,7 @@ import { describe, it } from "@effect/vitest";
 import * as Option from "effect/Option";
 import { expect, given, role, scene, text } from "foldkit/scene";
 import { ada, titledPersonType } from "@/domain/entityStore.fixture";
-import { init, Message, update, view } from "./main.ts";
+import { init, Message, update, view } from "./index.ts";
 
 const withEntities = [
   Message.SucceededFetchType({ info: titledPersonType }),

@@ -1,0 +1,165 @@
+import * as Array from "effect/Array";
+import * as Option from "effect/Option";
+import * as Record from "effect/Record";
+import type * as Schema from "effect/Schema";
+import { Detail, Proposal, changedFields, dataDetails } from "@/components/confirm";
+import { PreparedWrite } from "@/components/entityForm/main";
+import { Impact } from "@/domain/consequences";
+import { asObject } from "@/domain/json";
+import type { Backlink, Entity, LensReport } from "@/domain/entityStore";
+import { plural } from "@/lib/format";
+
+// The confirmations for each kind of write, built from what the forms and
+// dry runs found. Every write shows its field-by-field before and after.
+
+/** A new document's fields, without the `null`s a create drops. */
+const withoutNulls = (value: Schema.Json): Readonly<Record<string, Schema.Json>> =>
+  Option.match(asObject(value), {
+    onNone: () => ({}),
+    onSome: (object) =>
+      Record.filter(object, (item): item is Schema.Json => item !== null && item !== undefined),
+  });
+
+/** The confirmation for a write the entity form prepared. */
+export const entityWriteProposal = (write: PreparedWrite): Proposal =>
+  PreparedWrite.match(write, {
+    Upsert: ({ type, id, version, before, after, created, expectedRev }) => {
+      const details = dataDetails(before, after);
+      return Proposal.make({
+        title: created ? `Create ${type} ${id}` : `Save ${type} ${id}`,
+        summary: created
+          ? `A new ${type}, written as v${version}.`
+          : `Written as v${version}, only if ${id} is still at rev ${expectedRev}.`,
+        confirmLabel: created ? "Create" : "Save",
+        isDestructive: false,
+        details,
+        notes: created && expectedRev === 0 ? [`Fails if ${id} is taken by then.`] : [],
+        refusals: [],
+        impact: Impact.EntityWrite({
+          type,
+          op: created ? "create" : "update",
+          changed: changedFields(details),
+        }),
+      });
+    },
+    Create: ({ type, version, data }) => {
+      const details = dataDetails({}, withoutNulls(data));
+      return Proposal.make({
+        title: `Create a ${type}`,
+        summary: `A new ${type} with a generated ID, written as v${version}.`,
+        confirmLabel: "Create",
+        isDestructive: false,
+        details,
+        notes: [],
+        refusals: [],
+        impact: Impact.EntityWrite({ type, op: "create", changed: changedFields(details) }),
+      });
+    },
+    Replace: ({ type, id, version, data, before, expectedRev }) => {
+      const details = dataDetails(before, data);
+      return Proposal.make({
+        title: `Replace ${type} ${id}`,
+        summary: `The whole document, written as v${version}, only if ${id} is still at rev ${expectedRev}.`,
+        confirmLabel: "Save",
+        isDestructive: false,
+        details,
+        notes: [],
+        refusals: [],
+        impact: Impact.EntityWrite({ type, op: "update", changed: changedFields(details) }),
+      });
+    },
+  });
+
+/** Who links to an entity, as reasons it can't be deleted. */
+export const backlinkRefusals = (
+  backlinks: ReadonlyArray<Backlink>,
+  hasMore: boolean,
+): ReadonlyArray<string> =>
+  Array.match(backlinks, {
+    onEmpty: () => [],
+    onNonEmpty: (links) => [
+      `Other entities link to it: ${links.map((link) => `${link.source} (${link.type}, ${link.path})`).join(", ")}${hasMore ? ", and more" : ""}. Remove those links first.`,
+    ],
+  });
+
+/** The confirmation for deleting an entity, before its backlinks are known. */
+export const entityDeleteProposal = (entity: Entity, title: Option.Option<string>): Proposal =>
+  Proposal.make({
+    title: `Delete ${entity.type} ${Option.getOrElse(title, () => entity.id)}`,
+    summary: `Deletes ${entity.id} at rev ${entity.rev}. Its history is kept, and the ID can be used again.`,
+    confirmLabel: "Delete",
+    isDestructive: true,
+    details: dataDetails(entity.data, {}),
+    notes: [],
+    refusals: [],
+    impact: Impact.EntityWrite({ type: entity.type, op: "delete", changed: [] }),
+  });
+
+const reportNotes = (report: LensReport): ReadonlyArray<string> => [
+  `The lens check ran ${report.forward.checked} sample documents forward, ${report.backward.checked} back, and ${plural(report.existing.checked, "stored entity")} forward.`,
+  ...report.warnings,
+];
+
+const reportRefusals = (report: LensReport): ReadonlyArray<string> =>
+  report.ok
+    ? []
+    : [
+        ...Array.map(
+          [...report.forward.failures, ...report.existing.failures],
+          (failure) => `Forward: ${JSON.stringify(failure.input)} fails: ${failure.error}`,
+        ),
+        ...Array.map(
+          report.backward.failures,
+          (failure) => `Backward: ${JSON.stringify(failure.input)} fails: ${failure.error}`,
+        ),
+        "Write this change by hand on the New version page, where the lens can convert values.",
+      ];
+
+/** The confirmation for a new version generated by the type form, after its lens check. */
+export const versionProposal = (input: {
+  readonly type: string;
+  readonly from: number;
+  readonly opCount: number;
+  readonly details: ReadonlyArray<Detail>;
+  readonly renamed: ReadonlyArray<{ readonly from: string; readonly to: string }>;
+  readonly removed: ReadonlyArray<string>;
+  readonly report: LensReport;
+}): Proposal =>
+  Proposal.make({
+    title: `Save ${input.type} v${input.from + 1}`,
+    summary: `A new version with a generated lens of ${plural(input.opCount, "op")}, only if ${input.type} is still at v${input.from}.`,
+    confirmLabel: `Save v${input.from + 1}`,
+    isDestructive: false,
+    details: input.details,
+    notes: reportNotes(input.report),
+    refusals: reportRefusals(input.report),
+    impact: Impact.TypeSave({
+      type: input.type,
+      isNew: false,
+      renamed: input.renamed,
+      removed: input.removed,
+    }),
+  });
+
+/** The confirmation for deleting a type, with what would refuse it now. */
+export const typeDeleteProposal = (input: {
+  readonly type: string;
+  readonly latestVersion: number;
+  readonly reasons: ReadonlyArray<string>;
+}): Proposal =>
+  Proposal.make({
+    title: `Delete ${input.type}`,
+    summary: `Deletes the type at v${input.latestVersion}, only if it's still at v${input.latestVersion}.`,
+    confirmLabel: "Delete type",
+    isDestructive: true,
+    details: [
+      Detail.make({
+        label: input.type,
+        before: Option.some(`v${input.latestVersion}`),
+        after: Option.none(),
+      }),
+    ],
+    notes: [],
+    refusals: Array.map(input.reasons, (reason) => `${input.type} is in use: ${reason}`),
+    impact: Impact.TypeDelete({ type: input.type }),
+  });

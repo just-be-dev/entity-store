@@ -147,6 +147,15 @@ const foldTypeList = Update.foldChild({
 
 const foldTypeDetail = Update.foldChild({
   update: TypeDetail.update,
+  foldOutMessage: (outMessage) =>
+    TypeDetail.OutMessage.match(outMessage, {
+      ChangedTypes:
+        () =>
+        (stepModel: Model): UpdateReturn => ({
+          model: stepModel,
+          commands: [FetchNavTypes()],
+        }),
+    }),
   read: (model: Model) =>
     Page.matchOrElse(model.page, { TypeDetail: ({ model: page }) => Option.some(page) }, () =>
       Option.none(),

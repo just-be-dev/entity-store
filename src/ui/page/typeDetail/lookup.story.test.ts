@@ -10,7 +10,7 @@ import {
   Lookup,
   Message,
   update,
-} from "./main.ts";
+} from "./index.ts";
 
 const loaded = [
   Message.SucceededFetchType({ info: personType }),
