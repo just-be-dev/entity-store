@@ -435,7 +435,7 @@ const cell = (
 
 const rowActions = (entity: Entity, label: string, h: HtmlBuilder<Message>): Html =>
   h.div(
-    [h.Class("flex justify-end gap-1")],
+    [h.Class("-ml-2 mt-1 flex gap-0.5")],
     [
       button(
         {
@@ -477,16 +477,23 @@ const entityRow = (
       h.td(
         [h.Class("py-2 pr-4")],
         [
-          ...Option.match(title, {
-            onNone: () => [],
-            onSome: (text) => [h.div([h.Class("text-sm font-medium")], [text])],
-          }),
           h.a(
             [
               h.Href(href(AppRoute.EntityDetail({ id: entity.id }))),
               h.Class("font-mono text-xs text-primary underline-offset-4 hover:underline"),
             ],
             [entity.id],
+          ),
+          ...(Array.isReadonlyArrayEmpty(columns)
+            ? Option.match(title, {
+                onNone: () => [],
+                onSome: (text) => [h.div([h.Class("text-sm font-medium")], [text])],
+              })
+            : []),
+          rowActions(
+            entity,
+            Option.getOrElse(title, () => entity.id),
+            h,
           ),
         ],
       ),
@@ -513,16 +520,6 @@ const entityRow = (
           ),
         ],
         [formatTime(entity.updatedAt)],
-      ),
-      h.td(
-        [h.Class("py-1.5")],
-        [
-          rowActions(
-            entity,
-            Option.getOrElse(title, () => entity.id),
-            h,
-          ),
-        ],
       ),
     ],
   );
@@ -574,10 +571,6 @@ const entitiesTable = (
                       h.th(
                         [h.Class("hidden pb-2 pr-4 font-medium md:table-cell"), h.Scope("col")],
                         ["Updated"],
-                      ),
-                      h.th(
-                        [h.Class("pb-2 font-medium"), h.Scope("col")],
-                        [h.span([h.Class("sr-only")], ["Actions"])],
                       ),
                     ],
                   ),

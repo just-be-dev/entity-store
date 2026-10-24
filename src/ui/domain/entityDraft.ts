@@ -148,12 +148,20 @@ const parse = (
   });
 };
 
+/** The schema's message for one field, without the path the form already shows. */
+const withoutPath = (message: string): string =>
+  message
+    .split("\n")
+    .map((line) => line.replace(/\s+at \[[^\]]*\]$/, "").trim())
+    .filter((line) => line !== "")
+    .join("; ");
+
 const checkValue = (field: FormField, value: Schema.Json): Result.Result<Schema.Json, string> =>
-  Result.map(
+  Result.mapBoth(
     compiled({ fields: { [field.name]: { ...field.type, optional: true } } }).validate({
       [field.name]: value,
     }),
-    () => value,
+    { onFailure: withoutPath, onSuccess: () => value },
   );
 
 /** One input's value: none when empty, or why it can't be saved. */

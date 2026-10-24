@@ -32,6 +32,7 @@ import {
 } from "@/domain/typeDraft";
 import { TypeDraft as TypeDraftSchema } from "@/domain/typeDraft";
 import { cn } from "@/lib/utils";
+import { AppRoute, href } from "@/route";
 import { Lens } from "../../../lens/model.ts";
 import { EntitySchema, TYPE_NAME_PATTERN } from "../../../schema/model.ts";
 
@@ -500,13 +501,36 @@ const fieldRow = (model: Model, field: FieldDraft, h: HtmlBuilder<Message>): Htm
         "Remove",
         h,
       ),
-      h.input([
-        h.AriaLabel(`Description of ${rowName(field)}`),
-        h.Value(field.description),
-        h.Placeholder("Description (optional)"),
-        h.OnInput((value) => Message.UpdatedFieldDescription({ key: field.key, value })),
-        h.Class(cn(inputClass, "sm:col-span-5 text-xs md:text-xs")),
-      ]),
+      h.div(
+        [h.Class("flex items-center gap-3 sm:col-span-5")],
+        [
+          h.input([
+            h.AriaLabel(`Description of ${rowName(field)}`),
+            h.Value(field.description),
+            h.Placeholder("Description (optional)"),
+            h.OnInput((value) => Message.UpdatedFieldDescription({ key: field.key, value })),
+            h.Class(cn(inputClass, "flex-1 text-xs md:text-xs")),
+          ]),
+          Option.match(
+            Option.filter(field.maybeOrigin, (origin) => origin !== field.name.trim()),
+            {
+              onNone: () => h.empty,
+              onSome: (origin) =>
+                h.span(
+                  [h.Class("shrink-0 text-xs text-muted-foreground")],
+                  ["Renamed from ", h.code([h.Class("font-mono")], [origin])],
+                ),
+            },
+          ),
+          Mode.match(model.mode, {
+            Create: () => h.empty,
+            Edit: () =>
+              Option.isNone(field.maybeOrigin)
+                ? h.span([h.Class("shrink-0 text-xs text-muted-foreground")], ["New"])
+                : h.empty,
+          }),
+        ],
+      ),
     ],
   );
 
@@ -517,7 +541,7 @@ const titleSelect = (model: Model, h: HtmlBuilder<Message>): Html => {
     onSome: (key) => `${key}`,
   });
   return h.div(
-    [h.Class("flex flex-col gap-1.5")],
+    [h.Class("flex max-w-sm flex-col gap-1.5")],
     [
       h.label([h.For("type-title"), h.Class(inputLabelClass)], ["Title field"]),
       h.select(
@@ -681,6 +705,26 @@ export const view = Submodel.defineView<Model, Message>((model, h): Html =>
           ),
       }),
       problemsView(model.problems, h),
+      Mode.match(model.mode, {
+        Create: () => h.empty,
+        Edit: ({ type }) =>
+          Array.isReadonlyArrayEmpty(model.problems)
+            ? h.empty
+            : h.p(
+                [h.Class("text-sm text-muted-foreground")],
+                [
+                  "To convert values or reshape fields, write the version by hand on the ",
+                  h.a(
+                    [
+                      h.Href(href(AppRoute.NewVersion({ name: type }))),
+                      h.Class("text-primary underline underline-offset-4"),
+                    ],
+                    ["New version page"],
+                  ),
+                  ".",
+                ],
+              ),
+      }),
       h.div(
         [h.Class("flex flex-wrap items-center gap-2")],
         [

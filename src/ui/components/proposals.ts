@@ -96,7 +96,7 @@ export const entityDeleteProposal = (entity: Entity, title: Option.Option<string
   });
 
 const reportNotes = (report: LensReport): ReadonlyArray<string> => [
-  `The lens check ran ${report.forward.checked} sample documents forward, ${report.backward.checked} back, and ${plural(report.existing.checked, "stored entity")} forward.`,
+  `The lens check ran ${report.forward.checked} sample documents forward, ${report.backward.checked} back, and ${report.existing.checked} stored ${report.existing.checked === 1 ? "entity" : "entities"} forward.`,
   ...report.warnings,
 ];
 

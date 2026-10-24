@@ -223,56 +223,63 @@ const isTaken = (check: IdCheck, id: string) => check._tag === "Taken" && check.
 const submitFields = (model: Model): UpdateReturn => {
   const id = model.idText.trim();
   const isCreate = model.mode._tag === "Create";
-  if (isCreate && String.isNonEmpty(id)) {
-    const problem = idProblem(id);
-    if (Option.isSome(problem)) {
-      return invalid(model, problem.value);
-    }
-    if (isTaken(model.idCheck, id)) {
-      return invalid(model, `${id} is taken. Choose another ID.`);
-    }
+  const maybeIdProblem =
+    isCreate && String.isNonEmpty(id)
+      ? Option.orElse(idProblem(id), () =>
+          isTaken(model.idCheck, id)
+            ? Option.some(`${id} is taken. Choose another ID.`)
+            : Option.none(),
+        )
+      : Option.none();
+  const patch = patchOf(fieldsOf(model), model.values, model.initial, isCreate ? "create" : "edit");
+  const fieldErrors = Result.match(patch, { onFailure: (errors) => errors, onSuccess: () => [] });
+  if (Option.isSome(maybeIdProblem) || Array.isReadonlyArrayNonEmpty(fieldErrors)) {
+    return invalid(
+      model,
+      [
+        ...Option.toArray(maybeIdProblem),
+        ...(Array.isReadonlyArrayEmpty(fieldErrors)
+          ? []
+          : [
+              fieldErrors.length === 1
+                ? "One field can't be saved."
+                : `${fieldErrors.length} fields can't be saved.`,
+            ]),
+      ].join(" "),
+      fieldErrors,
+    );
   }
-  return Result.match(
-    patchOf(fieldsOf(model), model.values, model.initial, isCreate ? "create" : "edit"),
-    {
-      onFailure: (errors) =>
-        invalid(
-          model,
-          errors.length === 1
-            ? "One field can't be saved."
-            : `${errors.length} fields can't be saved.`,
-          errors,
-        ),
-      onSuccess: (patch) =>
-        Mode.match<UpdateReturn>(model.mode, {
-          Create: () =>
-            String.isEmpty(id)
-              ? {
-                  model: modifyFields(model, { stage: () => Stage.Editing() }),
-                  outMessage: OutMessage.PreparedWrite({
-                    write: PreparedWrite.Create({
-                      type: model.type,
-                      version: model.version,
-                      data: patch,
-                    }),
+  return Result.match(patch, {
+    onFailure: (errors) => invalid(model, "Fields can't be saved.", errors),
+    onSuccess: (patch) =>
+      Mode.match<UpdateReturn>(model.mode, {
+        Create: () =>
+          String.isEmpty(id)
+            ? {
+                model: modifyFields(model, { stage: () => Stage.Editing() }),
+                outMessage: OutMessage.PreparedWrite({
+                  write: PreparedWrite.Create({
+                    type: model.type,
+                    version: model.version,
+                    data: patch,
                   }),
-                }
-              : {
-                  model: modifyFields(model, { stage: () => Stage.Checking() }),
-                  commands: [CheckWrite({ type: model.type, id, version: model.version, patch })],
-                },
-          Edit: ({ id: editId }) =>
-            Record.isEmptyRecord(patch)
-              ? invalid(model, "Nothing changed.")
-              : {
-                  model: modifyFields(model, { stage: () => Stage.Checking() }),
-                  commands: [
-                    CheckWrite({ type: model.type, id: editId, version: model.version, patch }),
-                  ],
-                },
-        }),
-    },
-  );
+                }),
+              }
+            : {
+                model: modifyFields(model, { stage: () => Stage.Checking() }),
+                commands: [CheckWrite({ type: model.type, id, version: model.version, patch })],
+              },
+        Edit: ({ id: editId }) =>
+          Record.isEmptyRecord(patch)
+            ? invalid(model, "Nothing changed.")
+            : {
+                model: modifyFields(model, { stage: () => Stage.Checking() }),
+                commands: [
+                  CheckWrite({ type: model.type, id: editId, version: model.version, patch }),
+                ],
+              },
+      }),
+  });
 };
 
 const submitJson = (model: Model, text: string): UpdateReturn =>

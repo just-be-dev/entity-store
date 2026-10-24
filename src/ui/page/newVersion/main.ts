@@ -419,13 +419,9 @@ const submit = (model: Model, info: TypeInfo, force: boolean): UpdateReturn => {
             onNone: () => [],
             onSome: (version) => schemaDetails(version.schema, schema),
           }),
-          notes: [
-            ...(force
-              ? ["This skips the lens check's verdict: entities may read back invalid."]
-              : [
-                  "The API property-checks the lens again and refuses it if documents don't survive.",
-                ]),
-          ],
+          notes: force
+            ? ["This skips the lens check's verdict: entities may read back invalid."]
+            : ["The API property-checks the lens again and refuses it if documents don't survive."],
           refusals: [],
           impact: Impact.TypeSave({ type: model.name, isNew: false, renamed, removed }),
         }),
