@@ -2,7 +2,7 @@ import { expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { DeployConfig } from "./stack.ts";
+import { DeployConfig, runWorkerFirst } from "./stack.ts";
 
 const read = (env: Record<string, string>) => DeployConfig.parse(ConfigProvider.fromUnknown(env));
 
@@ -43,3 +43,8 @@ it.effect("skips the route for previews and when the host or zone is missing or 
     expect(Option.isNone(blank.prodRoute)).toBe(true);
   }),
 );
+
+it("runs the edge first for pages on deployed stages only, never for the hashed build", () => {
+  expect(runWorkerFirst(false)).toEqual(["/*", "!/assets/*"]);
+  expect(runWorkerFirst(true)).toEqual(["/api/*", "/_hub", "/_hub/*"]);
+});

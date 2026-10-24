@@ -310,6 +310,7 @@ describe("the edge's import graph", () => {
     expect(modules.map((path) => path.slice(here.length + 1)).sort()).toEqual([
       "edge.ts",
       "hub-identity.ts",
+      "hub-redirect.ts",
       "hub.ts",
       "identity.ts",
     ]);

@@ -7,6 +7,7 @@ import * as Option from "effect/Option";
 import { AccessApp, AgentToken, isDev, teamDomain } from "./access.ts";
 import Api from "./api.ts";
 import { hubBindings } from "./hub-bindings.ts";
+import { hubFramePrefix, hubToken } from "./hub-frame.ts";
 import { hubPaths } from "./hub.ts";
 import { ChangesQueue } from "./queue.ts";
 
@@ -44,6 +45,14 @@ export const DeployConfig = Config.all({
 
 const { prodRoute } = Effect.runSync(DeployConfig);
 
+/**
+ * The paths the App's edge sees before the built assets. Deployed stages run it for every path but
+ * the hashed build files, so it can send page loads to the hub (hub-redirect.ts) and serve the rest
+ * from `ASSETS`. `alchemy dev` redirects nothing, so Vite serves pages there as before.
+ */
+export const runWorkerFirst = (dev: boolean): Array<string> =>
+  dev ? ["/api/*", ...hubPaths] : ["/*", "!/assets/*"];
+
 export const App = Cloudflare.Website.Foldkit(
   "App",
   Effect.gen(function* () {
@@ -52,6 +61,10 @@ export const App = Cloudflare.Website.Foldkit(
     // Blank in local dev, where nothing is verified (and no shell is bound).
     const access = isDev ? undefined : yield* AccessApp;
     const team = access === undefined ? "" : yield* teamDomain;
+    // Deployed stages send page loads on their own hostname to the hub (hub-redirect.ts); blank
+    // in local dev, where nothing redirects.
+    const hubClientId = isDev ? "" : (yield* hubToken()).clientId;
+    const hubPrefix = isDev ? "" : hubFramePrefix(yield* Alchemy.Stage);
     return {
       main: "src/platform/cloudflare/edge.ts",
       env: {
@@ -59,9 +72,11 @@ export const App = Cloudflare.Website.Foldkit(
         ...hubBindings(isDev),
         ACCESS_AUD: access === undefined ? "" : access.aud,
         ACCESS_TEAM_DOMAIN: team,
+        HUB_CLIENT_ID: hubClientId,
+        HUB_FRAME_PREFIX: hubPrefix,
       },
       ...(access === undefined ? {} : { access }),
-      assets: { runWorkerFirst: ["/api/*", ...hubPaths] },
+      assets: { runWorkerFirst: runWorkerFirst(isDev) },
       ...Option.match(prodRoute, { onNone: () => ({}), onSome: ({ routes }) => ({ routes }) }),
       compatibility: { date: "2026-10-04" },
       observability: {
