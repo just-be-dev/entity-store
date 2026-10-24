@@ -1,8 +1,30 @@
 import { describe, it } from "@effect/vitest";
 import * as Option from "effect/Option";
-import { Command, change, click, expect, given, label, role, scene, text } from "foldkit/scene";
+import { Dialog } from "@foldkit/ui";
+import {
+  Command,
+  Mount,
+  change,
+  click,
+  expect,
+  given,
+  inside,
+  label,
+  role,
+  scene,
+  text,
+} from "foldkit/scene";
 import { apiFailure, failingReport, personType } from "@/domain/entityStore.fixture";
-import { CheckLens, CreateVersion, init, Message, RunLens, update, view } from "./main.ts";
+import {
+  CheckLens,
+  CreateVersion,
+  FetchUsage,
+  init,
+  Message,
+  RunLens,
+  update,
+  view,
+} from "./main.ts";
 
 const loaded = [
   Message.SucceededFetchType({ info: personType }),
@@ -48,6 +70,22 @@ describe("new version", () => {
       { update, view },
       given(loaded),
       click(role("button", { name: "Create version" })),
+      Command.resolveAll([Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()]),
+      Mount.resolve(Dialog.AcquireResources, Dialog.Message.SucceededAcquireResources()),
+      Command.resolve(
+        FetchUsage,
+        Message.SucceededFetchUsage({
+          consumers: {
+            type: "person",
+            automations: { status: "unavailable", reason: "not connected" },
+          },
+        }),
+      ),
+      expect(role("dialog", { name: "Save person v3" })).toExist(),
+      expect(role("region", { name: "Consequences" })).toContainText(
+        "Couldn't check automations: not connected",
+      ),
+      inside(role("dialog"), click(role("button", { name: "Create version" }))),
       Command.resolve(
         CreateVersion,
         Message.FailedCreateVersion({
@@ -56,6 +94,8 @@ describe("new version", () => {
           }),
         }),
       ),
+      Command.resolveAll([Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()]),
+      Mount.expectEnded(Dialog.AcquireResources),
       expect(role("button", { name: "Create anyway" })).toExist(),
       expect(text("Lens check failed")).toExist(),
     );

@@ -9,10 +9,12 @@ import {
   personV2Schema,
 } from "@/domain/entityStore.fixture";
 import { prettyJson } from "@/domain/json";
+import { Dialog } from "@foldkit/ui";
 import {
   Check,
   CheckLens,
   CreateVersion,
+  FetchUsage,
   FetchFunctions,
   FetchType,
   init,
@@ -51,7 +53,9 @@ describe("new version", () => {
       update,
       given(drafted),
       message(Message.ClickedCheckLens()),
-      Command.expectExact(CheckLens({ name: "person", schema: personV2Schema, lens })),
+      Command.expectExact(
+        CheckLens({ name: "person", schema: personV2Schema, lens, expectedVersion: 2 }),
+      ),
       Command.resolve(
         CheckLens,
         Message.SucceededCheckLens({ from: 2, to: 3, report: passingReport }),
@@ -76,11 +80,20 @@ describe("new version", () => {
     );
   });
 
-  it("offers to force a version the lens check rejected, then navigates to the type", () => {
+  it("confirms a version against the version it was written from, offers to force a rejected lens, then navigates", () => {
     story(
       update,
       given(update(drafted, Message.UpdatedNote({ value: " add age " })).model),
       message(Message.SubmittedNewVersion()),
+      model((m) => {
+        expect(m.dialog.isOpen).toBe(true);
+        expect(Option.map(m.maybePending, (pending) => pending.proposal.title)).toEqual(
+          Option.some("Save person v3"),
+        );
+      }),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      Command.resolve(FetchUsage, Message.FailedFetchUsage({ failure: apiFailure(0, "x", "off") })),
+      message(Message.ClickedConfirm()),
       Command.expectExact(
         CreateVersion({
           name: "person",
@@ -88,6 +101,7 @@ describe("new version", () => {
           lens,
           note: "add age",
           force: false,
+          expectedVersion: 2,
         }),
       ),
       Command.resolve(
@@ -98,8 +112,15 @@ describe("new version", () => {
           }),
         }),
       ),
-      model((m) => expect(m.submission).toEqual(Submission.Rejected({ report: failingReport }))),
+      model((m) => {
+        expect(m.submission).toEqual(Submission.Rejected({ report: failingReport }));
+        expect(m.dialog.isOpen).toBe(false);
+      }),
+      Command.resolve(Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()),
       message(Message.ClickedCreateAnyway()),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      Command.resolve(FetchUsage, Message.FailedFetchUsage({ failure: apiFailure(0, "x", "off") })),
+      message(Message.ClickedConfirm()),
       Command.expectExact(
         CreateVersion({
           name: "person",
@@ -107,9 +128,11 @@ describe("new version", () => {
           lens,
           note: "add age",
           force: true,
+          expectedVersion: 2,
         }),
       ),
       Command.resolve(CreateVersion, Message.SucceededCreateVersion()),
+      Command.resolve(Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()),
       Command.resolve(NavigateToType, Message.CompletedNavigateToType()),
     );
   });
@@ -132,18 +155,31 @@ describe("new version", () => {
     );
   });
 
-  it("keeps other creation failures as errors", () => {
+  it("keeps a stale version's conflict in the dialog", () => {
     story(
       update,
       given(drafted),
       message(Message.SubmittedNewVersion()),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      Command.resolve(FetchUsage, Message.FailedFetchUsage({ failure: apiFailure(0, "x", "off") })),
+      message(Message.ClickedConfirm()),
       Command.resolve(
         CreateVersion,
         Message.FailedCreateVersion({
-          failure: apiFailure(409, "VersionConflict", "Another version was added first"),
+          failure: apiFailure(
+            409,
+            "VersionConflict",
+            "person is at v3, not v2; reload and try again",
+            {
+              currentVersion: Option.some(3),
+            },
+          ),
         }),
       ),
-      model((m) => expect(m.submission._tag).toBe("Failed")),
+      model((m) => {
+        expect(m.confirmation._tag).toBe("Failed");
+        expect(m.dialog.isOpen).toBe(true);
+      }),
     );
   });
 

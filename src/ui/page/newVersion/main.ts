@@ -3,14 +3,21 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import { Command, Submodel } from "foldkit";
+import { Command, Submodel, Update } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 import { defineMessageUnion } from "foldkit/message";
 import { pushUrl } from "foldkit/navigation";
 import { defineTaggedUnion } from "foldkit/schema";
 import { modifyFields } from "foldkit/struct";
-import type * as Update from "foldkit/update";
 import { apiUrl, getJson, postJson, segment } from "@/api";
+import {
+  Detail,
+  Proposal,
+  Submission as Confirmation,
+  Usage,
+  confirmDialog,
+  initDialog,
+} from "@/components/confirm";
 import { errorAlert, failureAlert, issueList } from "@/components/feedback";
 import { jsonBlock } from "@/components/json";
 import { pageHeader, section, statusText } from "@/components/layout";
@@ -18,7 +25,9 @@ import { selectField } from "@/components/select";
 import { badge } from "@/components/ui/badge";
 import { button } from "@/components/ui/button";
 import { input } from "@/components/ui/input";
+import * as Dialog from "@/components/ui/dialog";
 import { textarea } from "@/components/ui/textarea";
+import { Impact } from "@/domain/consequences";
 import {
   AddedVersion,
   ApiFailure,
@@ -28,12 +37,15 @@ import {
   LensFunctions,
   LensReport,
   LensRun,
+  TypeConsumers,
   TypeInfo,
   VersionCheck,
 } from "@/domain/entityStore";
+import { decodeSchema, describeField } from "@/domain/typeDraft";
 import { exampleDocument, parseJson, prettyJson } from "@/domain/json";
 import { AppRoute, href } from "@/route";
 import { lensReportView } from "./report.ts";
+import type { EntitySchema } from "../../../schema/model.ts";
 
 export const EMPTY_LENS = `{
   "ops": []
@@ -82,6 +94,17 @@ export const Trial = defineTaggedUnion({
 });
 export type Trial = typeof Trial.Type;
 
+/** A version waiting for confirmation, against the latest version it was written from. */
+export const PendingVersion = Schema.Struct({
+  schema: Schema.Json,
+  lens: Schema.Json,
+  note: Schema.String,
+  force: Schema.Boolean,
+  expectedVersion: Schema.Int,
+  proposal: Proposal,
+});
+export type PendingVersion = typeof PendingVersion.Type;
+
 export const Model = Schema.Struct({
   name: Schema.String,
   type: TypeState,
@@ -94,6 +117,10 @@ export const Model = Schema.Struct({
   trialDoc: Schema.String,
   trialDirection: Direction,
   trial: Trial,
+  dialog: Dialog.Model,
+  maybePending: Schema.Option(PendingVersion),
+  confirmation: Confirmation,
+  usage: Usage,
 });
 export type Model = typeof Model.Type;
 
@@ -118,6 +145,10 @@ export const Message = defineMessageUnion({
   UpdatedTrialDoc: { value: Schema.String },
   SelectedTrialDirection: { direction: Direction },
   ClickedRunLens: {},
+  GotDialogMessage: { message: Dialog.Message },
+  SucceededFetchUsage: { consumers: TypeConsumers },
+  FailedFetchUsage: { failure: ApiFailure },
+  ClickedConfirm: {},
   SucceededRunLens: { output: Schema.Json },
   FailedRunLens: { error: Schema.String, issues: Schema.Array(Issue) },
 });
@@ -143,11 +174,30 @@ export const FetchFunctions = Command.define("FetchFunctions", {
   ),
 });
 
+export const FetchUsage = Command.define("FetchUsage", {
+  args: { name: Schema.String },
+  messages: [Message.SucceededFetchUsage, Message.FailedFetchUsage],
+  execute: ({ name }) =>
+    getJson(apiUrl(`types/${segment(name)}/consumers`), TypeConsumers).pipe(
+      Effect.map((consumers) => Message.SucceededFetchUsage({ consumers })),
+      Effect.catch((failure) => Effect.succeed(Message.FailedFetchUsage({ failure }))),
+    ),
+});
+
 export const CheckLens = Command.define("CheckLens", {
-  args: { name: Schema.String, schema: Schema.Json, lens: Schema.Json },
+  args: {
+    name: Schema.String,
+    schema: Schema.Json,
+    lens: Schema.Json,
+    expectedVersion: Schema.Int,
+  },
   messages: [Message.SucceededCheckLens, Message.FailedCheckLens],
-  execute: ({ name, schema, lens }) =>
-    postJson(apiUrl(`types/${segment(name)}/versions/check`), { schema, lens }, VersionCheck).pipe(
+  execute: ({ name, schema, lens, expectedVersion }) =>
+    postJson(
+      apiUrl(`types/${segment(name)}/versions/check`),
+      { schema, lens, expectedVersion },
+      VersionCheck,
+    ).pipe(
       Effect.map(({ from, to, report }) => Message.SucceededCheckLens({ from, to, report })),
       Effect.catch((failure) => Effect.succeed(Message.FailedCheckLens({ failure }))),
     ),
@@ -160,12 +210,13 @@ export const CreateVersion = Command.define("CreateVersion", {
     lens: Schema.Json,
     note: Schema.String,
     force: Schema.Boolean,
+    expectedVersion: Schema.Int,
   },
   messages: [Message.SucceededCreateVersion, Message.FailedCreateVersion],
-  execute: ({ name, schema, lens, note, force }) =>
+  execute: ({ name, schema, lens, note, force, expectedVersion }) =>
     postJson(
       apiUrl(`types/${segment(name)}/versions`),
-      { schema, lens, note, force },
+      { schema, lens, note, force, expectedVersion },
       AddedVersion,
     ).pipe(
       Effect.as(Message.SucceededCreateVersion()),
@@ -218,6 +269,10 @@ export const init = (name: string): Update.Return<Model, Message> => ({
     trialDoc: "{}",
     trialDirection: "forward",
     trial: Trial.Idle(),
+    dialog: initDialog(),
+    maybePending: Option.none(),
+    confirmation: Confirmation.Idle(),
+    usage: Usage.Loading(),
   }),
   commands: [FetchType({ name }), FetchFunctions()],
 });
@@ -239,18 +294,157 @@ const parseDraft = (model: Model): Result.Result<Draft, string> =>
       ),
   );
 
-const submit = (model: Model, force: boolean): UpdateReturn => {
-  if (model.submission._tag === "Submitting") {
+const toDialogMessage = (message: Dialog.Message) => Message.GotDialogMessage({ message });
+
+const readDialog = (model: Model) => Option.some(model.dialog);
+const writeDialog = (model: Model, nextDialog: Dialog.Model) =>
+  modifyFields(model, { dialog: () => nextDialog });
+
+/** A closed dialog drops its pending version, unless it's being created. */
+const foldDialogOutMessage = (outMessage: Dialog.OutMessage) =>
+  Dialog.OutMessage.match(outMessage, {
+    Opened: () => (stepModel: Model) => ({ model: stepModel }),
+    Closed: () => (stepModel: Model) => ({
+      model:
+        stepModel.confirmation._tag === "Working"
+          ? stepModel
+          : modifyFields(stepModel, {
+              maybePending: () => Option.none(),
+              confirmation: () => Confirmation.Idle(),
+            }),
+    }),
+  });
+
+const foldDialog = Update.foldChild({
+  update: Dialog.update,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const openDialog = Update.foldChildStep({
+  update: Dialog.open,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const closeDialog = Update.foldChildStep({
+  update: Dialog.close,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const noFields: EntitySchema["fields"] = {};
+
+const fieldsOf = (schema: Schema.Json): EntitySchema["fields"] =>
+  Option.match(decodeSchema(schema), {
+    onNone: () => noFields,
+    onSome: (decoded) => decoded.fields,
+  });
+
+/** The fields that differ between two schemas, by name. */
+const schemaDetails = (before: Schema.Json, after: Schema.Json): ReadonlyArray<Detail> => {
+  const left = fieldsOf(before);
+  const right = fieldsOf(after);
+  return Array.filterMap(Array.dedupe([...Object.keys(left), ...Object.keys(right)]), (name) => {
+    const from = Option.fromNullishOr(left[name]);
+    const to = Option.fromNullishOr(right[name]);
+    return JSON.stringify(Option.getOrUndefined(from)) === JSON.stringify(Option.getOrUndefined(to))
+      ? Result.failVoid
+      : Result.succeed(
+          Detail.make({
+            label: name,
+            before: Option.map(from, (type) =>
+              Option.isSome(to) && describeField(type) === describeField(to.value)
+                ? JSON.stringify(type)
+                : describeField(type),
+            ),
+            after: Option.map(to, (type) =>
+              Option.isSome(from) && describeField(type) === describeField(from.value)
+                ? JSON.stringify(type)
+                : describeField(type),
+            ),
+          }),
+        );
+  });
+};
+
+/** Top-level lens ops of one kind, read loosely: the API checks the lens itself. */
+const opsOf = (lens: Schema.Json, op: string): ReadonlyArray<Readonly<Record<string, unknown>>> => {
+  const ops = typeof lens === "object" && lens !== null && "ops" in lens ? lens["ops"] : undefined;
+  return globalThis.Array.isArray(ops)
+    ? Array.filter(
+        ops,
+        (item): item is Readonly<Record<string, unknown>> =>
+          typeof item === "object" && item !== null && "op" in item && item["op"] === op,
+      )
+    : [];
+};
+
+const submit = (model: Model, info: TypeInfo, force: boolean): UpdateReturn => {
+  if (model.submission._tag === "Submitting" || Option.isSome(model.maybePending)) {
     return { model };
   }
   return Result.match(parseDraft(model), {
     onFailure: (message) => ({
       model: modifyFields(model, { submission: () => Submission.Invalid({ message }) }),
     }),
-    onSuccess: ({ schema, lens }) => ({
-      model: modifyFields(model, { submission: () => Submission.Submitting({ force }) }),
-      commands: [CreateVersion({ name: model.name, schema, lens, note: model.note.trim(), force })],
-    }),
+    onSuccess: ({ schema, lens }) => {
+      const latest = Array.findFirst(info.versions, (v) => v.version === info.latestVersion);
+      const renamed = Array.filterMap(opsOf(lens, "rename"), (op) =>
+        typeof op["from"] === "string" && typeof op["to"] === "string"
+          ? Result.succeed({ from: op["from"], to: op["to"] })
+          : Result.failVoid,
+      );
+      const removed = Array.filterMap(opsOf(lens, "remove"), (op) =>
+        typeof op["field"] === "string" ? Result.succeed(op["field"]) : Result.failVoid,
+      );
+      const pending = PendingVersion.make({
+        schema,
+        lens,
+        note: model.note.trim(),
+        force,
+        expectedVersion: info.latestVersion,
+        proposal: Proposal.make({
+          title: `Save ${model.name} v${info.latestVersion + 1}`,
+          summary: `A new version with your lens, only if ${model.name} is still at v${info.latestVersion}.`,
+          confirmLabel: force ? "Create anyway" : "Create version",
+          isDestructive: force,
+          details: Option.match(latest, {
+            onNone: () => [],
+            onSome: (version) => schemaDetails(version.schema, schema),
+          }),
+          notes: [
+            ...(force
+              ? ["This skips the lens check's verdict: entities may read back invalid."]
+              : [
+                  "The API property-checks the lens again and refuses it if documents don't survive.",
+                ]),
+          ],
+          refusals: [],
+          impact: Impact.TypeSave({ type: model.name, isNew: false, renamed, removed }),
+        }),
+      });
+      return Update.combine(
+        modifyFields(model, {
+          maybePending: () => Option.some(pending),
+          confirmation: () => Confirmation.Idle(),
+          usage: () => Usage.Loading(),
+        }),
+        [
+          (stepModel: Model): UpdateReturn => ({
+            model: stepModel,
+            commands: [FetchUsage({ name: model.name })],
+          }),
+          openDialog,
+        ],
+      );
+    },
   });
 };
 
@@ -316,7 +510,18 @@ export const update = (model: Model, message: Message) =>
         }),
         onSuccess: ({ schema, lens }) => ({
           model: modifyFields(model, { check: () => Check.Checking() }),
-          commands: [CheckLens({ name: model.name, schema, lens })],
+          commands: [
+            CheckLens({
+              name: model.name,
+              schema,
+              lens,
+              expectedVersion: TypeState.match(model.type, {
+                Loading: () => 1,
+                Failed: () => 1,
+                Loaded: ({ info }) => info.latestVersion,
+              }),
+            }),
+          ],
         }),
       });
     },
@@ -326,24 +531,80 @@ export const update = (model: Model, message: Message) =>
     FailedCheckLens: ({ failure }) => ({
       model: modifyFields(model, { check: () => Check.Failed({ failure }) }),
     }),
-    SubmittedNewVersion: () => submit(model, false),
-    ClickedCreateAnyway: () => submit(model, true),
-    SucceededCreateVersion: () => ({
-      model,
-      commands: [NavigateToType({ name: model.name })],
-    }),
-    FailedCreateVersion: ({ failure }) => ({
-      model: modifyFields(model, {
-        submission: () =>
-          Option.match(
-            Option.filter(failure.report, () => isLensCheckRejection(failure)),
-            {
-              onNone: () => Submission.Failed({ failure }),
-              onSome: (report) => Submission.Rejected({ report }),
-            },
-          ),
+    SubmittedNewVersion: () =>
+      TypeState.match(model.type, {
+        Loading: () => ({ model }),
+        Failed: () => ({ model }),
+        Loaded: ({ info }) => submit(model, info, false),
       }),
+    ClickedCreateAnyway: () =>
+      TypeState.match(model.type, {
+        Loading: () => ({ model }),
+        Failed: () => ({ model }),
+        Loaded: ({ info }) => submit(model, info, true),
+      }),
+    GotDialogMessage: ({ message: dialogMessage }) => foldDialog(model, dialogMessage),
+    SucceededFetchUsage: ({ consumers }) => ({
+      model: modifyFields(model, { usage: () => Usage.Loaded({ usage: consumers.automations }) }),
     }),
+    FailedFetchUsage: ({ failure }) => ({
+      model: modifyFields(model, { usage: () => Usage.Failed({ failure }) }),
+    }),
+    ClickedConfirm: () =>
+      Option.match(model.maybePending, {
+        onNone: () => ({ model }),
+        onSome: (pending) =>
+          model.confirmation._tag === "Working"
+            ? { model }
+            : {
+                model: modifyFields(model, {
+                  confirmation: () => Confirmation.Working(),
+                  submission: () => Submission.Submitting({ force: pending.force }),
+                }),
+                commands: [
+                  CreateVersion({
+                    name: model.name,
+                    schema: pending.schema,
+                    lens: pending.lens,
+                    note: pending.note,
+                    force: pending.force,
+                    expectedVersion: pending.expectedVersion,
+                  }),
+                ],
+              },
+      }),
+    SucceededCreateVersion: () => {
+      const closed = closeDialog(
+        modifyFields(model, {
+          maybePending: () => Option.none(),
+          confirmation: () => Confirmation.Idle(),
+        }),
+      );
+      return {
+        model: closed.model,
+        commands: [...(closed.commands ?? []), NavigateToType({ name: model.name })],
+      };
+    },
+    FailedCreateVersion: ({ failure }) =>
+      Option.match(
+        Option.filter(failure.report, () => isLensCheckRejection(failure)),
+        {
+          onNone: () => ({
+            model: modifyFields(model, {
+              submission: () => Submission.Idle(),
+              confirmation: () => Confirmation.Failed({ failure }),
+            }),
+          }),
+          onSome: (report) =>
+            closeDialog(
+              modifyFields(model, {
+                submission: () => Submission.Rejected({ report }),
+                maybePending: () => Option.none(),
+                confirmation: () => Confirmation.Idle(),
+              }),
+            ),
+        },
+      ),
     CompletedNavigateToType: () => ({ model }),
     UpdatedTrialDoc: ({ value }) => ({ model: modifyFields(model, { trialDoc: () => value }) }),
     SelectedTrialDirection: ({ direction }) => ({
@@ -705,6 +966,17 @@ const loadedView = (model: Model, info: TypeInfo, h: HtmlBuilder<Message>): Html
           h.div([h.Class("min-w-0 space-y-6")], [editorView(model, info, h), trialView(model, h)]),
           h.div([h.Class("min-w-0")], [cheatSheet(model.functions, h)]),
         ],
+      ),
+      confirmDialog(
+        {
+          dialog: model.dialog,
+          maybeProposal: Option.map(model.maybePending, (pending) => pending.proposal),
+          usage: model.usage,
+          submission: model.confirmation,
+          onConfirm: Message.ClickedConfirm(),
+          toDialogMessage,
+        },
+        h,
       ),
     ],
   );
