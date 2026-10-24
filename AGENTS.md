@@ -5,6 +5,7 @@ An entity store on Cloudflare D1 where schemas and the lenses between schema ver
 - `src/schema/`: the JSON schema language and its compiler to Effect Schema.
 - `src/lens/`: lens ops, the expression language, and the lens property check.
 - `src/entity/`: the `EntityStore` application (types, versions, entities, history), the `SqlDatabase` port, and JSON patch/diff helpers.
+- `src/consumers/`: which of the automations app's automations and templates use a type (the `AutomationsDirectory` port, its MCP translation, and the type-delete policy).
 - `src/http/`: routes and error mapping; `src/api.ts` composes them with the health route.
 - `src/platform/cloudflare/`: D1 declaration (`database.ts`), the D1 `SqlDatabase` adapter (`d1.ts`), the API Worker (`api.ts`), the stack, and the edge.
 - `src/testing/`: SQLite (`node:sqlite`) implementation of `SqlDatabase` for tests, using the real migrations.
@@ -23,6 +24,8 @@ An entity store on Cloudflare D1 where schemas and the lenses between schema ver
 - Reads lens stored data to the requested version and validate the result. Data that doesn't project is reported per item (`failures`), not silently dropped or returned unvalidated.
 - Lens expressions run in the API Worker on reads: keep the language pure, deterministic, prototype-safe, and bounded (`STEP_BUDGET`). Don't add I/O, clocks, randomness, or `eval`.
 - Changing the meaning of an existing lens op or expression function changes how stored data reads. Add new ops/functions instead.
+- Type writes and deletes take `expectedVersion`; check it before the lens check and keep it in the write's batch condition.
+- The API binds automations' prod `Api` (`AUTOMATIONS`, `src/platform/cloudflare/automations.ts`) on the `prod` stage only; `alchemy dev` and other stages bind nothing. When automations can't be asked, report `status: "unavailable"` and let the store decide; never present that, or `unchecked` automations, as "no automations use it". Only HTTP `DELETE /api/types/:type` (`src/consumers/application.ts`) refuses types automations uses: the store's and the RPC's `deleteType` never call automations, because automations calls the RPC itself.
 
 ## The hub shell
 

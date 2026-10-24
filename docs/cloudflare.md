@@ -18,6 +18,7 @@ edge.ts ── service binding ── Api Worker ◀── direct client (worker
                                    │  └── RPC from other stacks' Workers (service binding)
                                    ├── domain services
                                    ├── D1 (EntityDb)
+                                   ├── AUTOMATIONS ──▶ automations' prod Api (prod stage only)
                                    └── Changes queue ──▶ consumer in another stack
 ```
 
@@ -34,6 +35,20 @@ named `entity-store-<stage>-changes`) as a producer, and returns the
 `EntityStoreRpc` methods next to `fetch`. Both are declared for other stacks
 to use (see [API](api.md#consuming-from-another-alchemy-stack)). The stack
 outputs `apiWorkerName` and `changesQueueName`.
+
+On the `prod` stage only, the API also binds the `automations` stack's prod
+`Api` Worker as a raw service binding, `AUTOMATIONS`
+(`src/platform/cloudflare/automations.ts`), to ask which automations and
+templates use a type (see [API](api.md#automations-that-use-a-type)). The
+stage is Alchemy's (`--stage prod`, as `mise run deploy` passes), read at plan
+time. Automations runs only against entity-store's prod, and a ref to a stage
+automations doesn't have would fail the deploy, so `alchemy dev` and other
+stages bind nothing and report automations as not connected. Each call is
+`stub.mcp(body, {})`, made as a member call, with a 4-second timeout; a
+rejection, a timeout, or Alchemy's `~alchemy/rpc/error` envelope makes
+automations unavailable for that request rather than failing it. Spans are
+`Automations.mcp`, `AutomationsMcp.callTool`, and `AutomationsDirectory.usage`,
+with no payloads.
 
 Both Workers use compatibility date `2026-10-04`. When you move it, test the new date rather than relying on Cloudflare's default.
 

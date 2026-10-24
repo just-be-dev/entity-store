@@ -31,6 +31,8 @@ All HTTP routes live under `/api` and need a verified principal (Cloudflare Acce
 | `POST /api/types`                      | `{ name, description?, schema }`                    | `201 TypeInfo` (version 1)              |
 | `GET /api/types/:type`                 |                                                     | `TypeInfo` (all versions, oldest first) |
 | `DELETE /api/types/:type`              | `?expectedVersion`, or `{ expectedVersion? }`       | `{ name }`                              |
+| `POST /api/types/:type/delete/check`   | `?expectedVersion`, or `{ expectedVersion? }`       | `TypeDeleteCheck` (dry run)             |
+| `GET /api/types/:type/consumers`       |                                                     | `TypeConsumers`                         |
 | `GET /api/types/:type/versions/:v`     |                                                     | `VersionInfo & { jsonSchema }`          |
 | `POST /api/types/:type/versions/check` | `{ schema, lens, samples?, expectedVersion? }`      | `{ from, to, report: LensReport }`      |
 | `POST /api/types/:type/versions`       | `{ schema, lens, note?, force?, expectedVersion? }` | `201 { version: VersionInfo, report }`  |
@@ -45,8 +47,28 @@ type VersionInfo = { type; version; schema: EntitySchema; lens?: Lens; note; cre
 deleted entities, and their revisions and changes. It's refused with
 `409 TypeInUse` (`reasons`, such as `"it has 3 live entities"` or
 `"post's latest schema (v2) links to it"`) while the type has live entities
-or another type's latest schema links to it. A type can then be created
-again under the same name, starting from v1.
+or another type's latest schema links to it. It's also refused while
+[automations](#automations-that-use-a-type) uses the type, with reasons
+added after the store's: `"automations use it: onboarding (Onboarding), payroll (Payroll)"`
+and `"template slots point to it: welcome.hire"` (up to 10 names each, then
+`", and N more"`). A type can then be created again under the same name,
+starting from v1.
+
+`POST /api/types/:type/delete/check` is a dry run of that `DELETE`, for a
+confirm dialog. It deletes nothing and returns
+
+```ts
+type TypeDeleteCheck = {
+  type: string;
+  latestVersion: number;
+  reasons: string[]; // exactly what DELETE would refuse with now; empty: it would delete
+  consumers: TypeConsumers; // as GET /api/types/:type/consumers returns
+};
+```
+
+It fails like `DELETE` for a missing type (`404 TypeNotFound`) or a stale
+`expectedVersion` (`409 VersionConflict`). The real delete re-checks
+everything, so it can still be refused if something changed in between.
 
 `expectedVersion` is the type's latest version as the client read it. On
 `versions` and `versions/check` it's the version the lens goes from; on
@@ -75,6 +97,70 @@ type LensReport = {
   warnings: string[];
 };
 ```
+
+### Automations that use a type
+
+The automations app (stack `automations`) watches entity-store's change
+feed: each change becomes an `entity.created`, `entity.updated` or
+`entity.deleted` event, and entity triggers on the type start runs. Its
+templates have slots that ref entity types. entity-store doesn't track any
+of this; `GET /api/types/:type/consumers` asks automations at request time:
+
+```ts
+type TypeConsumers = {
+  type: string;
+  automations:
+    | {
+        status: "checked";
+        watching: AutomationUse[]; // saved trigger is about this type
+        listening: AutomationUse[]; // saved entity.* event trigger with no subject: every type
+        templateSlots: { template: string; label: string; slot: string }[]; // ref slots to this type
+        unchecked: { id: string; name: string; error: string }[]; // couldn't be checked
+      }
+    | { status: "unavailable"; reason: string };
+};
+type AutomationUse = {
+  id: string;
+  name: string;
+  trigger: {
+    kind: "manual" | "entity" | "event" | "schedule" | "date";
+    event?: string; // event triggers: the event
+    fields?: string[]; // entity triggers: the watched fields (absent: any field)
+    hasCondition: boolean; // has a `when`
+  };
+};
+```
+
+- **watching:** an `entity`, `schedule` or `date` trigger whose `entity` is
+  the type, or a `manual` or `event` trigger whose `subject` is. An entity
+  trigger starts a run when an entity of the type is created, or updated in
+  one of `fields`, and its condition holds; deletes start none.
+- **listening:** an `event` trigger on `entity.created`, `entity.updated` or
+  `entity.deleted` with no `subject`, which fires for every type's writes.
+- **unchecked:** automations whose state automations couldn't read, or
+  whose trigger kind entity-store doesn't know. They may use the type.
+- Automations without a saved workflow are left out. `label` is the
+  template's. Lists are sorted by id (template slots by template, then slot).
+- It's `200` with `status: "unavailable"` and a `reason` when automations
+  can't be asked: it isn't bound to this stage (local dev and previews,
+  `"automations isn't connected to this stage"`), didn't answer within a few
+  seconds, failed, or answered something that doesn't decode. That never
+  means "no automations".
+- `404 TypeNotFound` if the type doesn't exist.
+
+`DELETE /api/types/:type` (HTTP only) is refused while automations, when it
+can be asked, reports `watching` automations or `templateSlots` for the type.
+`listening` and `unchecked` automations don't stop it. When automations is
+unavailable the delete goes ahead on the store's own checks; the UI warns
+first. Automations can start using a type right after it was asked, so this
+is a guard for people, not a guarantee. The RPC `deleteType` doesn't ask
+automations: automations calls it itself after checking its own side.
+
+The API asks over automations' `mcp(body, headers)` RPC method (one
+stateless MCP JSON-RPC message per call) with `tools/call` for its read-only
+`list_automations` and `list_templates` tools, naming no person. It's bound
+as `AUTOMATIONS`, to automations' `prod` `Api` Worker, only on entity-store's
+`prod` stage (see [Cloudflare](cloudflare.md#topology)).
 
 ## Entities
 
@@ -247,6 +333,10 @@ writes do.
 | `getChange(id, rev, options?)`  | `{ version? }`                                      | `Change`                               |
 | `listChanges(options?)`         | `{ after?, limit? }` (≤ 200)                        | `{ items: ChangeEvent[], nextAfter? }` |
 
+`deleteType` applies the store's checks only. Unlike `DELETE /api/types/:type`,
+it doesn't ask automations whether it uses the type: automations is the main
+RPC caller and checks its own automations and templates before it deletes.
+
 `EntityPage` is `{ items: Entity[], failures, nextCursor? }`, and
 `BacklinkPage` is `{ items: Backlink[], nextCursor? }`, as over HTTP.
 
@@ -266,6 +356,11 @@ stage:
 
 - `Api`: the API Worker, to bind for RPC.
 - `Changes`: the queue to consume.
+
+entity-store's own prod API binds the `automations` stack's prod `Api` back
+(as `AUTOMATIONS`) to ask which automations use a type; see
+[Automations that use a type](#automations-that-use-a-type). So deploy
+automations' prod before entity-store's prod refers to it.
 
 In this sketch, `ChangeEvent` is the type above and `handleChange` is the consumer's own code:
 

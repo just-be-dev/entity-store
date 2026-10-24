@@ -59,6 +59,7 @@ src/
   lens/                           lens ops, expression language, lens property check
   entity/                         EntityStore application, SqlDatabase port, patch/diff
   http/                           routes, body limits, error mapping
+  consumers/                      which automations and templates use a type (asks automations)
   rpc/                            RPC methods for service-binding callers
   api.ts                          route composition
   testing/                        node:sqlite SqlDatabase for tests
@@ -66,6 +67,7 @@ src/
     database.ts / d1.ts           D1 declaration and SqlDatabase adapter
     api.ts / stack.ts / edge.ts   API Worker, Alchemy stack, Website forwarding
     queue.ts                      Changes queue and its producer adapter
+    automations.ts                automations' Api binding (prod only) and its mcp transport
   ui/                             Foldkit UI
 ```
 
@@ -75,6 +77,7 @@ src/
 - Entity deletes are soft (tombstone plus a `delete` revision). An upsert recreates a deleted entity. Only deleting its whole type purges one.
 - Change rows are kept forever; there's no retention yet.
 - Links only restrict deletes; there's no cascade or "unlink on delete" option yet.
+- Automations' use of a type is asked at request time, not recorded. Only the prod stage can ask, and an automation saved after the check can still start using a type that's being deleted.
 
 ## Deploying
 

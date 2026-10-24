@@ -120,6 +120,14 @@ between the check and the batch fails the delete the same way.
 `addVersion` and `checkVersion` take the same `expectedVersion`: the version
 the new lens goes from.
 
+The store's `deleteType` (which the RPC calls) only knows about entity-store.
+`DELETE /api/types/:type` goes through an application operation
+(`src/consumers/application.ts`) that also asks the automations app and
+refuses a type its automations' saved triggers or its templates' ref slots
+use, adding those reasons after the store's. When automations can't be
+asked, only the store's checks apply. See
+[API](api.md#automations-that-use-a-type).
+
 Schema writes (`createType`, `addVersion`) re-check inside their batch that
 every type they link to still exists, so a `deleteType` that commits between
 the check and the write fails it with `InvalidSchema` rather than leaving a
