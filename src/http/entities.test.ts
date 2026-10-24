@@ -2,10 +2,12 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Layer from "effect/Layer";
+import * as Result from "effect/Result";
 import { apiRoutes } from "../api.ts";
 import { AutomationsDirectory, NOT_CONNECTED } from "../consumers/directory.ts";
 import { directoryOverMcp } from "../consumers/mcp.ts";
 import type { McpTransport } from "../consumers/mcp.ts";
+import { generateVersion } from "../lens/generate.ts";
 import { testAppLayer } from "../testing/app.ts";
 
 /** A client for the API, with automations answering through `automations` (unavailable by default). */
@@ -793,4 +795,127 @@ const automationsAnswering = (
         body: { jsonrpc: "2.0", id, result: { content: [], structuredContent, isError: false } },
       };
     }),
+});
+
+describe("the UI's write paths", () => {
+  it.effect("checks an id before creating: free, taken by the same type, or by another", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", { name: "person", schema: personSchema });
+      yield* call("POST", "/api/types", {
+        name: "note",
+        schema: { fields: { text: { type: "string" } } },
+      });
+      const free = yield* call("POST", "/api/types/person/entities/ada/check", {
+        patch: { name: "Ada", email: "ada@example.com" },
+      });
+      expect(free.body).toMatchObject({ created: true });
+      yield* call("PUT", "/api/types/person/entities/ada", {
+        patch: { name: "Ada", email: "ada@example.com" },
+        expectedRev: 0,
+      });
+      const taken = yield* call("POST", "/api/types/person/entities/ada/check", {
+        patch: { name: "Other", email: "o@example.com" },
+      });
+      expect(taken.body).toMatchObject({ created: false });
+      const elsewhere = yield* call("POST", "/api/types/note/entities/ada/check", {
+        patch: { text: "x" },
+      });
+      expect(elsewhere.status).toBe(409);
+      expect(elsewhere.body).toMatchObject({ code: "EntityTypeMismatch", actual: "person" });
+      const raced = yield* call("PUT", "/api/types/person/entities/ada", {
+        patch: { name: "Other", email: "o@example.com" },
+        expectedRev: 0,
+      });
+      expect(raced.status).toBe(409);
+      expect(raced.body).toMatchObject({ code: "RevConflict", currentRev: 1 });
+    }),
+  );
+
+  it.effect("clears an optional field with null in the patch, conditioned on the rev read", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      yield* call("POST", "/api/types", {
+        name: "person",
+        schema: {
+          fields: {
+            name: { type: "string" },
+            email: { type: "string", format: "email", optional: true },
+            age: { type: "number", integer: true, optional: true },
+          },
+        },
+      });
+      yield* call("PUT", "/api/types/person/entities/ada", {
+        patch: { name: "Ada", email: "ada@example.com", age: 36 },
+        expectedRev: 0,
+      });
+      const dry = yield* call("POST", "/api/types/person/entities/ada/check", {
+        patch: { email: null, age: 37 },
+      });
+      expect(dry.body).toEqual({ data: { name: "Ada", age: 37 }, version: 1, created: false });
+      const saved = yield* call("PUT", "/api/types/person/entities/ada", {
+        patch: { email: null, age: 37 },
+        expectedRev: 1,
+      });
+      expect(saved.body.entity).toMatchObject({ rev: 2, data: { name: "Ada", age: 37 } });
+      const required = yield* call("PUT", "/api/types/person/entities/ada", {
+        patch: { name: null },
+        expectedRev: 2,
+      });
+      expect(required.status).toBe(422);
+      expect(required.body.code).toBe("ValidationFailed");
+    }),
+  );
+
+  it.effect("saves a version generated from a rename, and old entities read through it", () =>
+    Effect.gen(function* () {
+      const call = yield* makeClient;
+      const v1 = {
+        title: "name",
+        fields: {
+          name: { type: "string" as const },
+          nickname: { type: "string" as const, optional: true },
+        },
+      };
+      yield* call("POST", "/api/types", { name: "person", schema: v1 });
+      yield* call("PUT", "/api/types/person/entities/ada", {
+        patch: { name: "Ada", nickname: "A" },
+        expectedRev: 0,
+      });
+      const generated = generateVersion(v1, {
+        title: "fullName",
+        fields: [
+          { name: "fullName", from: "name", type: { type: "string" } },
+          { name: "team", type: { type: "string", optional: true } },
+        ],
+      });
+      if (Result.isFailure(generated)) {
+        throw new Error(generated.failure.join("; "));
+      }
+      const { schema, lens } = generated.success;
+      const checked = yield* call("POST", "/api/types/person/versions/check", {
+        schema,
+        lens,
+        expectedVersion: 1,
+      });
+      expect(checked.body.report.ok).toBe(true);
+      const added = yield* call("POST", "/api/types/person/versions", {
+        schema,
+        lens,
+        expectedVersion: 1,
+      });
+      expect(added.status).toBe(201);
+      const read = yield* call("GET", "/api/entities/ada");
+      expect(read.body).toMatchObject({ version: 2, storedVersion: 1, data: { fullName: "Ada" } });
+      const asV1 = yield* call("GET", "/api/entities/ada?version=1");
+      expect(asV1.body.data).toEqual({ name: "Ada", nickname: "A" });
+      const stale = yield* call("POST", "/api/types/person/versions", {
+        schema,
+        lens,
+        expectedVersion: 1,
+      });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ code: "VersionConflict", currentVersion: 2 });
+    }),
+  );
 });

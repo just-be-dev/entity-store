@@ -20,11 +20,15 @@ The app follows [Foldkit's project organization](https://foldkit.dev/patterns/pr
 - Shared leaves know nothing about the root app: `api.ts` (HTTP helpers for Commands), `theme.ts` (Flags and saved theme), `lib/` (`cn`, icons, text and date formatting), and `components/` (shared components, with foldcn copies in `components/ui/`).
 - Root `story.test.ts` and `scene.test.ts` cover cross-page flows and parent composition. Put fixtures at the narrowest shared scope.
 
+## Writes go through a confirmation
+
+Every write the UI makes (types, versions, entities) opens the confirm dialog (`components/confirm.ts`) first: a field-by-field before and after, what follows (the change event and the automations it starts or affects, from `GET /api/types/:type/consumers`), and anything that refuses it. Say "couldn't check automations" when that call fails or automations is unavailable; never present that as "no automations". Writes are conditioned on what was shown: entities on `expectedRev`, types and versions on `expectedVersion`. The shared forms live in `components/typeForm/` (field rows, title by row, generated lens via `src/lens/generate.ts`) and `components/entityForm/` (typed inputs checked against the field's own definition, server dry run, empty clears to `null`); pages own the pending write and the dialog.
+
 ## Styling and foldcn
 
 The UI uses Tailwind CSS v4 and [foldcn](https://foldcn.elianiva.com), a shadcn-style registry of copy-paste Foldkit components. Agent docs are at https://foldcn.elianiva.com/llms.txt, and every page has a Markdown version at `/docs/<name>.md`.
 
-- Components live in `src/ui/components/ui/`: badge, bubble, button, empty, input, message, textarea, and a local port of shadcn's Trace. Trace uses controlled `@foldkit/ui` Disclosure helpers; its usage is in README.md. `cn` is in `src/ui/lib/utils.ts`. Import through the `@/` alias, which maps to `src/ui/` in `tsconfig.json` and `vite.config.ts`. The project owns these copies, so edit them freely.
+- Components live in `src/ui/components/ui/`: badge, bubble, button, dialog, empty, input, message, textarea, and a local port of shadcn's Trace. Trace uses controlled `@foldkit/ui` Disclosure helpers; its usage is in README.md. `cn` is in `src/ui/lib/utils.ts`. Import through the `@/` alias, which maps to `src/ui/` in `tsconfig.json` and `vite.config.ts`. The project owns these copies, so edit them freely.
 - Add a component with `mise run ui:add <name>`; `components.json` already registers the namespace. Review the diff afterwards, since the CLI may also touch `src/ui/styles.css` or `package.json`.
 - Never install the `@foldcn/foldcn` base item. Its dependency pins can conflict with the exact versions here. The theme mapping the components need is already in `src/ui/styles.css`.
 - Theme tokens live in `src/ui/styles.css`. Use semantic tokens like `bg-card` and `text-muted-foreground` instead of raw colors. For a saved theme, keep the system preference and an explicit `data-theme` in sync across Tailwind's dark variant, boot Flags, the persistence Command, and a same-origin pre-paint script.
