@@ -2,6 +2,7 @@ import * as zeroTrust from "@distilled.cloud/cloudflare/zero-trust";
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
+import { hubToken } from "./hub-frame.ts";
 
 /**
  * Cloudflare Access in front of both Workers (Website and API), so every
@@ -11,7 +12,10 @@ import * as Effect from "effect/Effect";
  * - members of the Cloudflare account, via Access login;
  * - the `AgentToken` service token (`CF-Access-Client-Id` /
  *   `CF-Access-Client-Secret` headers), for automated testing. Its secret
- *   lives only in Alchemy state.
+ *   lives only in Alchemy state;
+ * - hub prod's `PlatformToken` (hub-frame.ts), with which hub.just-be.dev
+ *   proxies the framed app. It stands for no one by itself: the API takes a
+ *   person only from the hub's signed identity token (identity.ts).
  *
  * Nothing is configured by hand: Access checks account membership itself, and
  * the Zero Trust team domain is looked up from the Cloudflare API at plan
@@ -58,6 +62,8 @@ export const AccessApp = Cloudflare.Access.Application(
   "Access",
   Effect.gen(function* () {
     const token = yield* AgentToken;
+    // A typed ref into hub prod's state; only deployed stages declare Access.
+    const hub = yield* hubToken();
     return {
       type: "self_hosted" as const,
       sessionDuration: "24h",
@@ -71,6 +77,11 @@ export const AccessApp = Cloudflare.Access.Application(
           name: "Agent token",
           decision: "non_identity" as const,
           include: [{ serviceToken: token.serviceTokenId }],
+        },
+        {
+          name: "Hub",
+          decision: "non_identity" as const,
+          include: [{ serviceToken: hub.serviceTokenId }],
         },
       ],
     };

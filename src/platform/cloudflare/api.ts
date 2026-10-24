@@ -1,5 +1,6 @@
-import type * as Alchemy from "alchemy";
+import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
@@ -18,13 +19,10 @@ import { bindAutomations } from "./automations.ts";
 import { d1SqlDatabase } from "./d1.ts";
 import { EntityDatabase } from "./database.ts";
 import { ChangesQueue, changeQueue } from "./queue.ts";
-import type { AccessVerifier } from "./identity.ts";
-import {
-  ACCESS_JWT_HEADER,
-  principalFromAccess,
-  remoteVerifier,
-  verifyAccessToken,
-} from "./identity.ts";
+import { hubAudience, hubKey, hubToken } from "./hub-frame.ts";
+import { hubIdentityHeader as HUB_IDENTITY_HEADER } from "./hub-identity.ts";
+import type { AccessVerifier, HubTrust } from "./identity.ts";
+import { ACCESS_JWT_HEADER, hubTrustFrom, remoteVerifier, requestPrincipal } from "./identity.ts";
 
 /** Backfill steps per building index per minute (500 entities each). */
 const CRON_BUILD_STEPS = 20;
@@ -79,10 +77,19 @@ export default class Api extends Cloudflare.Worker<Api>()(
           return props;
         }
         const access = yield* AccessApp;
+        // Recognizing the hub that frames the app (hub-frame.ts): its service token's client id,
+        // its identity key's public key, and the audience its tokens name for this stage.
+        const stage = yield* Alchemy.Stage;
         return {
           ...props,
           access,
-          env: { ACCESS_AUD: access.aud, ACCESS_TEAM_DOMAIN: yield* teamDomain },
+          env: {
+            ACCESS_AUD: access.aud,
+            ACCESS_TEAM_DOMAIN: yield* teamDomain,
+            HUB_CLIENT_ID: (yield* hubToken()).clientId,
+            HUB_PUBLIC_KEY: (yield* hubKey()).publicKey,
+            HUB_AUDIENCE: hubAudience(stage),
+          },
         };
       }),
   Effect.gen(function* () {
@@ -133,21 +140,38 @@ export default class Api extends Cloudflare.Worker<Api>()(
       }
       return verifier;
     };
+    let hub: Option.Option<HubTrust> | undefined;
+    const hubTrust = () => {
+      if (hub === undefined) {
+        hub = hubTrustFrom(env);
+      }
+      return hub;
+    };
     // Requests straight through Access carry `ctx.access`. Requests from the
     // Website don't (see identity.ts), so verify the Access token it forwards.
+    // The hub's service token stands for the person it vouches for, or no one.
     const identity = Layer.effect(
       Identity,
       Effect.gen(function* () {
         const access = yield* Cloudflare.Access.Context;
-        if (access !== undefined) {
-          const verified = yield* access.getIdentity().pipe(Effect.orElseSucceed(() => undefined));
-          return Identity.of({ principal: Option.some(principalFromAccess(verified)) });
-        }
+        const verified =
+          access === undefined
+            ? Option.none()
+            : Option.some({
+                email: (yield* access.getIdentity().pipe(Effect.orElseSucceed(() => undefined)))
+                  ?.email,
+              });
         const request = yield* HttpServerRequest.HttpServerRequest;
-        const principal = yield* Option.match(accessVerifier(), {
-          onNone: () => Effect.succeed(Option.none()),
-          onSome: (v) => verifyAccessToken(request.headers[ACCESS_JWT_HEADER], v),
-        });
+        const principal = yield* requestPrincipal(
+          {
+            access: verified,
+            jwt: request.headers[ACCESS_JWT_HEADER],
+            hubIdentity: request.headers[HUB_IDENTITY_HEADER],
+          },
+          accessVerifier(),
+          hubTrust(),
+          yield* Clock.currentTimeMillis,
+        );
         return Identity.of({ principal });
       }),
     );
