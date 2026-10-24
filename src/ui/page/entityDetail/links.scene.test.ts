@@ -1,8 +1,23 @@
 import { describe, it } from "@effect/vitest";
 import * as Option from "effect/Option";
-import { Command, click, expect, given, role, scene, text, within } from "foldkit/scene";
+import { Dialog } from "@foldkit/ui";
+import {
+  Command,
+  Mount,
+  click,
+  expect,
+  given,
+  label,
+  role,
+  scene,
+  submit,
+  text,
+  type,
+  within,
+} from "foldkit/scene";
+import * as EntityForm from "@/components/entityForm/main";
 import { ada, apiFailure, post, postType } from "@/domain/entityStore.fixture";
-import { DeleteEntity, FetchBacklinks, init, Message, SaveEntity, update, view } from "./main.ts";
+import { FetchBacklinks, FetchUsage, init, Message, update, view } from "./main.ts";
 
 const loaded = [
   Message.SucceededFetchEntity({
@@ -39,19 +54,16 @@ describe("entity links", () => {
     );
   });
 
-  it("shows who links here when a delete is refused", () => {
+  it("refuses a delete while something links here, naming who", () => {
     scene(
       { update, view },
       given(loaded),
       click(role("button", { name: "Delete entity" })),
-      click(role("button", { name: "Yes, delete" })),
+      Command.resolveAll([Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()]),
+      Mount.resolve(Dialog.AcquireResources, Dialog.Message.SucceededAcquireResources()),
       Command.resolve(
-        DeleteEntity,
-        Message.FailedDeleteEntity({
-          failure: apiFailure(409, "EntityLinked", "Entity 'p1' is linked from 1 entity", {
-            linkedFrom: [{ source: "n9", type: "note", path: "about" }],
-          }),
-        }),
+        FetchUsage,
+        Message.FailedFetchUsage({ failure: apiFailure(0, "x", "offline") }),
       ),
       Command.resolve(
         FetchBacklinks,
@@ -62,21 +74,20 @@ describe("entity links", () => {
           },
         }),
       ),
-      expect(text("Can't delete: linked from")).toExist(),
-      expect(
-        within(role("list", { name: "Linked from" }), role("link", { name: "n9" })),
-      ).toHaveAttr("href", "/entities/n9"),
+      expect(role("dialog")).toContainText("Other entities link to it: n9 (note, about)"),
+      expect(role("button", { name: "Delete" })).toBeDisabled(),
     );
   });
 
-  it("shows each invalid link a save was rejected for", () => {
+  it("shows each invalid link the dry run rejected", () => {
     scene(
       { update, view },
       given(loaded),
-      click(role("button", { name: "Save" })),
+      type(label("title"), "Changed"),
+      submit(role("form", { name: "Edit post" })),
       Command.resolve(
-        SaveEntity,
-        Message.FailedSaveEntity({
+        EntityForm.CheckWrite,
+        EntityForm.Message.FailedCheckWrite({
           failure: apiFailure(422, "LinkTargetInvalid", "Some links are invalid", {
             problems: [
               { path: "author", target: "nobody", message: "no entity 'nobody'" },

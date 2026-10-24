@@ -2,9 +2,11 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Option from "effect/Option";
 import { Command, given, message, model, story } from "foldkit/story";
 import { ada, apiFailure, personType, revision } from "@/domain/entityStore.fixture";
+import { Dialog } from "@foldkit/ui";
+import { Submission } from "@/components/confirm";
+import * as EntityForm from "@/components/entityForm/main";
 import {
   DeleteEntity,
-  Deletion,
   Editor,
   EntityState,
   FetchBacklinks,
@@ -16,10 +18,10 @@ import {
   FetchType,
   init,
   Message,
+  FetchUsage,
   NavigateToType,
-  Save,
-  SaveEntity,
   update,
+  WriteEntity,
 } from "./main.ts";
 
 const initial = init("ada");
@@ -37,6 +39,10 @@ const loaded = [
     page: historyPage([3, 2], Option.some(2)),
   }),
 ].reduce((m, msg) => update(m, msg).model, initial.model);
+const withType = update(loaded, Message.SucceededFetchType({ info: personType })).model;
+const editor = (formMessage: EntityForm.Message) =>
+  message(Message.GotEditorMessage({ message: formMessage }));
+const offline = apiFailure(0, "x", "offline");
 
 describe("entity detail", () => {
   it("loads the entity and its history, learning the latest version and seeding the editor", () => {
@@ -46,14 +52,11 @@ describe("entity detail", () => {
       FetchBacklinks.name,
     ]);
     expect(loaded.latestVersion).toEqual(Option.some(2));
-    expect(loaded.editor).toEqual(
-      Editor.Editing({
-        version: 2,
-        baseRev: 3,
-        text: '{\n  "fullName": "Ada Lovelace"\n}',
-        save: Save.Idle(),
-      }),
-    );
+    expect(loaded.editor).toEqual(Editor.Waiting({ entity: ada() }));
+    expect(withType.editor._tag === "Editing" && withType.editor.form.values).toEqual({
+      fullName: "Ada Lovelace",
+      age: "",
+    });
   });
 
   it("re-reads entity and history when the presented version changes", () => {
@@ -83,7 +86,7 @@ describe("entity detail", () => {
       model((m) => {
         expect(m.entity._tag === "Loaded" && m.entity.entity.version).toBe(1);
         expect(m.latestVersion).toEqual(Option.some(2));
-        expect(m.editor._tag === "Editing" && m.editor.version).toBe(2);
+        expect(m.editor._tag === "Waiting" && m.editor.entity.version).toBe(2);
       }),
     );
   });
@@ -115,29 +118,49 @@ describe("entity detail", () => {
     );
   });
 
-  it("saves with the writer's version and expected rev, then reloads", () => {
+  it("confirms a save, writes it with the writer's version and expected rev, then reloads", () => {
     story(
       update,
-      given(loaded),
-      message(Message.UpdatedEditText({ value: '{"fullName":"Augusta King"}' })),
-      message(Message.ClickedSave()),
+      given(withType),
+      editor(EntityForm.Message.UpdatedField({ name: "fullName", value: "Augusta King" })),
+      editor(EntityForm.Message.SubmittedForm()),
+      Command.resolve(
+        EntityForm.CheckWrite,
+        EntityForm.Message.SucceededCheckWrite({
+          check: { data: { fullName: "Augusta King" }, version: 2, created: false },
+        }),
+      ),
+      model((m) => expect(m.dialog.isOpen).toBe(true)),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      Command.resolve(FetchUsage, Message.FailedFetchUsage({ failure: offline })),
+      message(Message.ClickedConfirm()),
       Command.expectExact(
-        SaveEntity({ id: "ada", version: 2, data: { fullName: "Augusta King" }, expectedRev: 3 }),
+        WriteEntity({
+          write: EntityForm.PreparedWrite.Upsert({
+            type: "person",
+            id: "ada",
+            version: 2,
+            patch: { fullName: "Augusta King" },
+            expectedRev: 3,
+            before: { fullName: "Ada Lovelace" },
+            after: { fullName: "Augusta King" },
+            created: false,
+          }),
+        }),
       ),
       Command.resolve(
-        SaveEntity,
+        WriteEntity,
         Message.SucceededSaveEntity({
           entity: ada({ rev: 4, data: { fullName: "Augusta King" } }),
         }),
       ),
       model((m) => {
-        expect(m.editor._tag === "Editing" && m.editor.baseRev).toBe(4);
-        expect(m.editor._tag === "Editing" && m.editor.save).toEqual(Save.Saved({ rev: 4 }));
+        expect(m.maybeNotice).toEqual(Option.some("Saved as rev 4."));
+        expect(m.editor._tag === "Editing" && m.editor.form.values["fullName"]).toBe(
+          "Augusta King",
+        );
       }),
-      Command.expectExact(
-        FetchEntity({ id: "ada", version: Option.none() }),
-        FetchHistory({ id: "ada", version: Option.none() }),
-      ),
+      Command.resolve(Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()),
       Command.resolve(
         FetchEntity,
         Message.SucceededFetchEntity({
@@ -156,24 +179,30 @@ describe("entity detail", () => {
     );
   });
 
-  it("turns a stale-rev rejection into a conflict that reload resolves", () => {
+  it("keeps a stale-rev rejection in the dialog, and reload gets the other writer's data", () => {
     story(
       update,
-      given(loaded),
-      message(Message.ClickedSave()),
+      given(withType),
+      editor(EntityForm.Message.UpdatedField({ name: "age", value: "37" })),
+      editor(EntityForm.Message.SubmittedForm()),
       Command.resolve(
-        SaveEntity,
-        Message.FailedSaveEntity({
+        EntityForm.CheckWrite,
+        EntityForm.Message.SucceededCheckWrite({
+          check: { data: { fullName: "Ada Lovelace", age: 37 }, version: 2, created: false },
+        }),
+      ),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      Command.resolve(FetchUsage, Message.FailedFetchUsage({ failure: offline })),
+      message(Message.ClickedConfirm()),
+      Command.resolve(
+        WriteEntity,
+        Message.FailedWrite({
           failure: apiFailure(409, "RevConflict", "Entity 'ada' is at rev 5, not 3", {
             currentRev: Option.some(5),
           }),
         }),
       ),
-      model((m) => {
-        expect(m.editor._tag === "Editing" && m.editor.save).toEqual(
-          Save.Conflict({ currentRev: Option.some(5) }),
-        );
-      }),
+      model((m) => expect(m.submission._tag).toBe("Failed")),
       message(Message.ClickedReload()),
       Command.expectExact(
         FetchEntity({ id: "ada", version: Option.none() }),
@@ -207,8 +236,9 @@ describe("entity detail", () => {
         }),
       ),
       model((m) => {
-        expect(m.editor._tag === "Editing" && m.editor.baseRev).toBe(5);
-        expect(m.editor._tag === "Editing" && m.editor.save).toEqual(Save.Idle());
+        expect(m.editor._tag === "Editing" && m.editor.form.mode).toEqual(
+          EntityForm.Mode.Edit({ id: "ada", rev: 5, data: { fullName: "Someone Else" } }),
+        );
       }),
     );
   });
@@ -216,7 +246,7 @@ describe("entity detail", () => {
   it("loads the editor in another writer version", () => {
     story(
       update,
-      given(loaded),
+      given(withType),
       message(Message.SelectedWriteVersion({ version: 1 })),
       model((m) => expect(m.editor).toEqual(Editor.Loading({ version: 1 }))),
       Command.resolve(
@@ -226,10 +256,11 @@ describe("entity detail", () => {
         }),
       ),
       model((m) => {
-        expect(m.editor._tag === "Editing" && m.editor.version).toBe(1);
-        expect(m.editor._tag === "Editing" && JSON.parse(m.editor.text)).toEqual({
+        expect(m.editor._tag === "Editing" && m.editor.form.version).toBe(1);
+        expect(m.editor._tag === "Editing" && m.editor.form.values).toEqual({
           firstName: "Ada",
           lastName: "Lovelace",
+          nickname: "",
         });
       }),
     );
@@ -257,14 +288,19 @@ describe("entity detail", () => {
   it("confirms before deleting, then goes back to the type", () => {
     story(
       update,
-      given(loaded),
+      given(withType),
       message(Message.ClickedDelete()),
-      Command.expectNone(),
-      model((m) => expect(m.deletion).toEqual(Deletion.Confirming())),
-      message(Message.ClickedConfirmDelete()),
+      model((m) => expect(m.dialog.isOpen).toBe(true)),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      Command.resolve(FetchUsage, Message.FailedFetchUsage({ failure: offline })),
+      Command.resolve(
+        FetchBacklinks,
+        Message.SucceededFetchBacklinks({ page: { items: [], nextCursor: Option.none() } }),
+      ),
+      message(Message.ClickedConfirm()),
       Command.expectExact(DeleteEntity({ id: "ada", type: "person", expectedRev: 3 })),
       Command.resolve(DeleteEntity, Message.SucceededDeleteEntity({ type: "person" })),
-      Command.expectExact(NavigateToType({ name: "person" })),
+      Command.resolve(Dialog.CloseDialog, Dialog.Message.CompletedCloseDialog()),
       Command.resolve(NavigateToType, Message.CompletedNavigateToType()),
     );
   });
@@ -353,21 +389,14 @@ describe("entity detail", () => {
     );
   });
 
-  it("refreshes backlinks when a delete is refused because the entity is linked", () => {
+  it("refuses a delete while something links here, and refreshes backlinks if the API refuses", () => {
     story(
       update,
-      given(update(loaded, Message.ClickedDelete()).model),
-      message(Message.ClickedConfirmDelete()),
-      Command.resolve(
-        DeleteEntity,
-        Message.FailedDeleteEntity({
-          failure: apiFailure(409, "EntityLinked", "Entity 'ada' is linked", {
-            linkedFrom: [{ source: "p1", type: "post", path: "author" }],
-          }),
-        }),
-      ),
-      model((m) => expect(m.deletion._tag).toBe("Failed")),
-      Command.expectExact(FetchBacklinks({ id: "ada" })),
+      given(withType),
+      message(Message.ClickedDelete()),
+      Command.resolve(Dialog.ShowDialog, Dialog.Message.SucceededShowDialog()),
+      Command.resolve(FetchUsage, Message.FailedFetchUsage({ failure: offline })),
+      model((m) => expect(update(m, Message.ClickedConfirm()).commands ?? []).toEqual([])),
       Command.resolve(
         FetchBacklinks,
         Message.SucceededFetchBacklinks({
@@ -377,6 +406,21 @@ describe("entity detail", () => {
           },
         }),
       ),
+      model((m) => expect(update(m, Message.ClickedConfirm()).commands ?? []).toEqual([])),
+      message(
+        Message.FailedWrite({
+          failure: apiFailure(409, "EntityLinked", "Entity 'ada' is linked", {
+            linkedFrom: [{ source: "p1", type: "post", path: "author" }],
+          }),
+        }),
+      ),
+      model((m) => expect(m.submission._tag).toBe("Failed")),
+      Command.expectExact(FetchBacklinks({ id: "ada" })),
+      Command.resolve(
+        FetchBacklinks,
+        Message.SucceededFetchBacklinks({ page: { items: [], nextCursor: Option.none() } }),
+      ),
+      model((m) => expect(m.submission).not.toEqual(Submission.Working())),
     );
   });
 });

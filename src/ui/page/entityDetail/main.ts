@@ -1,24 +1,29 @@
 import * as Array from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import { Command, Submodel } from "foldkit";
+import { Command, Submodel, Update } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 import { defineMessageUnion } from "foldkit/message";
 import { pushUrl } from "foldkit/navigation";
 import { defineTaggedUnion } from "foldkit/schema";
 import { modifyFields } from "foldkit/struct";
-import type * as Update from "foldkit/update";
-import { apiUrl, deleteJson, getJson, putJson, segment } from "@/api";
-import { errorAlert, failureAlert, successAlert } from "@/components/feedback";
+import { apiUrl, deleteJson, getJson, postJson, putJson, segment } from "@/api";
+import { Proposal, Submission, Usage, confirmDialog, initDialog } from "@/components/confirm";
+import * as EntityForm from "@/components/entityForm/main";
+import { failureAlert, successAlert } from "@/components/feedback";
 import { jsonBlock } from "@/components/json";
 import { facts, pageHeader, section, statusText } from "@/components/layout";
+import { entityLink, preview } from "@/components/links";
+import {
+  backlinkRefusals,
+  entityDeleteProposal,
+  entityWriteProposal,
+} from "@/components/proposals";
 import { selectField, versionOptions } from "@/components/select";
 import { badge } from "@/components/ui/badge";
 import { button } from "@/components/ui/button";
-import { textarea } from "@/components/ui/textarea";
-import { entityLink, preview } from "@/components/links";
+import * as Dialog from "@/components/ui/dialog";
 import {
   ApiFailure,
   Backlink,
@@ -30,13 +35,16 @@ import {
   Included,
   Revision,
   RevisionFailure,
+  TypeConsumers,
   TypeInfo,
+  Upserted,
 } from "@/domain/entityStore";
-import { parseJson, prettyJson } from "@/domain/json";
 import { type OutgoingLink, outgoingLinks } from "@/domain/links";
 import { entityTitle } from "@/domain/title";
+import { decodeSchema } from "@/domain/typeDraft";
 import { formatTime } from "@/lib/format";
 import { AppRoute, href } from "@/route";
+import type { EntitySchema } from "../../../schema/model.ts";
 
 // MODEL
 
@@ -87,31 +95,23 @@ export const Backlinks = defineTaggedUnion({
 });
 export type Backlinks = typeof Backlinks.Type;
 
-export const Save = defineTaggedUnion({
-  Idle: {},
-  Saving: {},
-  Invalid: { message: Schema.String },
-  Conflict: { currentRev: Schema.Option(Schema.Int) },
-  Failed: { failure: ApiFailure },
-  Saved: { rev: Schema.Int },
-});
-export type Save = typeof Save.Type;
-
+/** The entity as the editor writes it: loading at a version, or a form over it. */
 export const Editor = defineTaggedUnion({
   Idle: {},
   Loading: { version: Schema.Int },
   Failed: { version: Schema.Int, failure: ApiFailure },
-  Editing: { version: Schema.Int, baseRev: Schema.Int, text: Schema.String, save: Save },
+  /** The entity is loaded at the version, but its type (for the form) isn't yet. */
+  Waiting: { entity: Entity },
+  Editing: { form: EntityForm.Model },
 });
 export type Editor = typeof Editor.Type;
 
-export const Deletion = defineTaggedUnion({
-  Idle: {},
-  Confirming: {},
-  Deleting: {},
-  Failed: { failure: ApiFailure },
+/** The write the confirmation dialog is asking about. */
+export const Pending = defineTaggedUnion({
+  Save: { write: EntityForm.PreparedWrite, proposal: Proposal },
+  Delete: { entity: Entity, proposal: Proposal },
 });
-export type Deletion = typeof Deletion.Type;
+export type Pending = typeof Pending.Type;
 
 export const Model = Schema.Struct({
   id: Schema.String,
@@ -122,7 +122,11 @@ export const Model = Schema.Struct({
   backlinks: Backlinks,
   history: History,
   editor: Editor,
-  deletion: Deletion,
+  dialog: Dialog.Model,
+  maybePending: Schema.Option(Pending),
+  submission: Submission,
+  usage: Usage,
+  maybeNotice: Schema.Option(Schema.String),
 });
 export type Model = typeof Model.Type;
 
@@ -149,16 +153,17 @@ export const Message = defineMessageUnion({
   SelectedWriteVersion: { version: Schema.Int },
   SucceededFetchEditBase: { entity: Entity },
   FailedFetchEditBase: { version: Schema.Int, failure: ApiFailure },
-  UpdatedEditText: { value: Schema.String },
-  ClickedSave: {},
+  GotEditorMessage: { message: EntityForm.Message },
+  GotDialogMessage: { message: Dialog.Message },
+  SucceededFetchUsage: { consumers: TypeConsumers },
+  FailedFetchUsage: { failure: ApiFailure },
+  ClickedConfirm: {},
   SucceededSaveEntity: { entity: Entity },
-  FailedSaveEntity: { failure: ApiFailure },
   ClickedReload: {},
   ClickedDelete: {},
-  ClickedCancelDelete: {},
-  ClickedConfirmDelete: {},
   SucceededDeleteEntity: { type: Schema.String },
-  FailedDeleteEntity: { failure: ApiFailure },
+  FailedWrite: { failure: ApiFailure },
+  ClickedDismissNotice: {},
   CompletedNavigateToType: {},
 });
 export type Message = typeof Message.Type;
@@ -262,23 +267,44 @@ export const FetchEditBase = Command.define("FetchEditBase", {
     ),
 });
 
-export const SaveEntity = Command.define("SaveEntity", {
-  args: { id: Schema.String, version: Schema.Int, data: Schema.Json, expectedRev: Schema.Int },
-  messages: [Message.SucceededSaveEntity, Message.FailedSaveEntity],
-  execute: ({ id, version, data, expectedRev }) =>
-    putJson(apiUrl(`entities/${segment(id)}`), { version, data, expectedRev }, Entity).pipe(
+export const FetchUsage = Command.define("FetchUsage", {
+  args: { name: Schema.String },
+  messages: [Message.SucceededFetchUsage, Message.FailedFetchUsage],
+  execute: ({ name }) =>
+    getJson(apiUrl(`types/${segment(name)}/consumers`), TypeConsumers).pipe(
+      Effect.map((consumers) => Message.SucceededFetchUsage({ consumers })),
+      Effect.catch((failure) => Effect.succeed(Message.FailedFetchUsage({ failure }))),
+    ),
+});
+
+export const WriteEntity = Command.define("WriteEntity", {
+  args: { write: EntityForm.PreparedWrite },
+  messages: [Message.SucceededSaveEntity, Message.FailedWrite],
+  execute: ({ write }) =>
+    EntityForm.PreparedWrite.match(write, {
+      Upsert: ({ type, id, version, patch, expectedRev }) =>
+        putJson(
+          apiUrl(`types/${segment(type)}/entities/${segment(id)}`),
+          { version, patch, expectedRev },
+          Upserted,
+        ).pipe(Effect.map(({ entity }) => entity)),
+      Create: ({ type, version, data }) =>
+        postJson(apiUrl(`types/${segment(type)}/entities`), { version, data }, Entity),
+      Replace: ({ id, version, data, expectedRev }) =>
+        putJson(apiUrl(`entities/${segment(id)}`), { version, data, expectedRev }, Entity),
+    }).pipe(
       Effect.map((entity) => Message.SucceededSaveEntity({ entity })),
-      Effect.catch((failure) => Effect.succeed(Message.FailedSaveEntity({ failure }))),
+      Effect.catch((failure) => Effect.succeed(Message.FailedWrite({ failure }))),
     ),
 });
 
 export const DeleteEntity = Command.define("DeleteEntity", {
   args: { id: Schema.String, type: Schema.String, expectedRev: Schema.Int },
-  messages: [Message.SucceededDeleteEntity, Message.FailedDeleteEntity],
+  messages: [Message.SucceededDeleteEntity, Message.FailedWrite],
   execute: ({ id, type, expectedRev }) =>
     deleteJson(apiUrl(`entities/${segment(id)}`, { expectedRev: `${expectedRev}` }), Deleted).pipe(
       Effect.as(Message.SucceededDeleteEntity({ type })),
-      Effect.catch((failure) => Effect.succeed(Message.FailedDeleteEntity({ failure }))),
+      Effect.catch((failure) => Effect.succeed(Message.FailedWrite({ failure }))),
     ),
 });
 
@@ -301,7 +327,11 @@ export const init = (id: string): Update.Return<Model, Message> => ({
     backlinks: Backlinks.Loading(),
     history: History.Loading(),
     editor: Editor.Idle(),
-    deletion: Deletion.Idle(),
+    dialog: initDialog(),
+    maybePending: Option.none(),
+    submission: Submission.Idle(),
+    usage: Usage.Loading(),
+    maybeNotice: Option.none(),
   }),
   commands: [
     FetchEntity({ id, version: Option.none() }),
@@ -329,16 +359,25 @@ const reloadShown = (model: Model): UpdateReturn => ({
   ],
 });
 
-const editing = (entity: Entity, save: Save): Editor =>
-  Editor.Editing({
-    version: entity.version,
-    baseRev: entity.rev,
-    text: prettyJson(entity.data),
-    save,
+/** A version's schema, from the type once it has loaded. */
+const schemaAt = (type: TypeState, version: number): Option.Option<EntitySchema> =>
+  TypeState.match(type, {
+    Idle: () => Option.none(),
+    Loading: () => Option.none(),
+    Failed: () => Option.none(),
+    Loaded: ({ info }) =>
+      Option.flatMap(
+        Array.findFirst(info.versions, (candidate) => candidate.version === version),
+        (found) => decodeSchema(found.schema),
+      ),
   });
 
-const withSave = (editor: Editor, save: Save): Editor =>
-  editor._tag === "Editing" ? Editor.Editing({ ...editor, save }) : editor;
+/** A form over `entity` once its type's schema for that version is known. */
+const editing = (entity: Entity, type: TypeState): Editor =>
+  Option.match(schemaAt(type, entity.version), {
+    onNone: () => Editor.Waiting({ entity }),
+    onSome: (schema) => Editor.Editing({ form: EntityForm.initEdit(entity, schema) }),
+  });
 
 /** Fetch the type once its name is known. */
 const loadType = (result: UpdateReturn, name: string): UpdateReturn =>
@@ -382,8 +421,125 @@ const editorVersion = (editor: Editor): Option.Option<number> =>
     Idle: () => Option.none(),
     Loading: ({ version }) => Option.some(version),
     Failed: ({ version }) => Option.some(version),
-    Editing: ({ version }) => Option.some(version),
+    Waiting: ({ entity }) => Option.some(entity.version),
+    Editing: ({ form }) => Option.some(form.version),
   });
+
+// The confirmation dialog
+
+const toDialogMessage = (message: Dialog.Message) => Message.GotDialogMessage({ message });
+
+const readDialog = (model: Model) => Option.some(model.dialog);
+const writeDialog = (model: Model, nextDialog: Dialog.Model) =>
+  modifyFields(model, { dialog: () => nextDialog });
+
+/** A closed dialog drops its pending write, unless the write is in flight. */
+const foldDialogOutMessage = (outMessage: Dialog.OutMessage) =>
+  Dialog.OutMessage.match(outMessage, {
+    Opened: () => (stepModel: Model) => ({ model: stepModel }),
+    Closed: () => (stepModel: Model) => ({
+      model:
+        stepModel.submission._tag === "Working"
+          ? stepModel
+          : modifyFields(stepModel, {
+              maybePending: () => Option.none(),
+              submission: () => Submission.Idle(),
+            }),
+    }),
+  });
+
+const foldDialog = Update.foldChild({
+  update: Dialog.update,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const openDialog = Update.foldChildStep({
+  update: Dialog.open,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const closeDialog = Update.foldChildStep({
+  update: Dialog.close,
+  read: readDialog,
+  write: writeDialog,
+  toParentMessage: toDialogMessage,
+  foldOutMessage: foldDialogOutMessage,
+});
+
+const propose = (model: Model, pending: Pending, type: string): UpdateReturn =>
+  Update.combine(model, [
+    (stepModel: Model): UpdateReturn => ({
+      model: modifyFields(stepModel, {
+        maybePending: () => Option.some(pending),
+        submission: () => Submission.Idle(),
+        usage: () => Usage.Loading(),
+        maybeNotice: () => Option.none(),
+      }),
+      commands: [FetchUsage({ name: type })],
+    }),
+    openDialog,
+  ]);
+
+const foldEditor = Update.foldChild({
+  update: EntityForm.update,
+  read: (model: Model) =>
+    model.editor._tag === "Editing" ? Option.some(model.editor.form) : Option.none(),
+  write: (model: Model, nextForm: EntityForm.Model): Model =>
+    modifyFields(model, { editor: (): Editor => Editor.Editing({ form: nextForm }) }),
+  toParentMessage: (message: EntityForm.Message) => Message.GotEditorMessage({ message }),
+  foldOutMessage: (outMessage) =>
+    EntityForm.OutMessage.match(outMessage, {
+      PreparedWrite:
+        ({ write }) =>
+        (stepModel: Model): UpdateReturn =>
+          propose(
+            stepModel,
+            Pending.Save({ write, proposal: entityWriteProposal(write) }),
+            write.type,
+          ),
+      Cancelled:
+        () =>
+        (stepModel: Model): UpdateReturn =>
+          EntityState.match<UpdateReturn>(stepModel.entity, {
+            Loading: () => ({ model: stepModel }),
+            Failed: () => ({ model: stepModel }),
+            Loaded: () =>
+              Option.match(editorVersion(stepModel.editor), {
+                onNone: () => ({ model: stepModel }),
+                onSome: (version) => ({
+                  model: modifyFields(stepModel, { editor: () => Editor.Loading({ version }) }),
+                  commands: [FetchEditBase({ id: stepModel.id, version })],
+                }),
+              }),
+          }),
+    }),
+});
+
+/** The pending write's confirmation, with a delete refused while anything links to the entity. */
+const proposalOf = (model: Model, pending: Pending): Proposal =>
+  Pending.match(pending, {
+    Save: ({ proposal }) => proposal,
+    Delete: ({ proposal }) =>
+      Backlinks.match(model.backlinks, {
+        Loading: () => proposal,
+        Failed: () => proposal,
+        Loaded: ({ items, nextCursor }) =>
+          Proposal.make({
+            ...proposal,
+            refusals: backlinkRefusals(items, Option.isSome(nextCursor)),
+          }),
+      }),
+  });
+
+const isRefused = (model: Model, pending: Pending): boolean =>
+  Array.isReadonlyArrayNonEmpty(proposalOf(model, pending).refusals) ||
+  (pending._tag === "Delete" && model.backlinks._tag === "Loading");
 
 export const update = (model: Model, message: Message) =>
   Message.match<UpdateReturn>(message, {
@@ -395,8 +551,7 @@ export const update = (model: Model, message: Message) =>
                 entity: () => EntityState.Loaded({ entity, included }),
                 latestVersion: (latest) =>
                   Option.isNone(requested) ? Option.some(entity.version) : latest,
-                editor: (editor) =>
-                  editor._tag === "Idle" ? editing(entity, Save.Idle()) : editor,
+                editor: (editor) => (editor._tag === "Idle" ? editing(entity, model.type) : editor),
               }),
             },
             entity.type,
@@ -408,12 +563,16 @@ export const update = (model: Model, message: Message) =>
         : { model },
     SelectedPresentVersion: ({ version }) =>
       reloadShown(modifyFields(model, { presentVersion: () => Option.some(version) })),
-    SucceededFetchType: ({ info }) => ({
-      model: modifyFields(model, {
-        type: () => TypeState.Loaded({ info }),
-        latestVersion: () => Option.some(info.latestVersion),
-      }),
-    }),
+    SucceededFetchType: ({ info }) => {
+      const type = TypeState.Loaded({ info });
+      return {
+        model: modifyFields(model, {
+          type: () => type,
+          latestVersion: () => Option.some(info.latestVersion),
+          editor: (editor) => (editor._tag === "Waiting" ? editing(editor.entity, type) : editor),
+        }),
+      };
+    },
     FailedFetchType: ({ failure }) => ({
       model: modifyFields(model, { type: () => TypeState.Failed({ failure }) }),
     }),
@@ -542,104 +701,102 @@ export const update = (model: Model, message: Message) =>
     }),
     SucceededFetchEditBase: ({ entity }) =>
       model.editor._tag === "Loading" && model.editor.version === entity.version
-        ? { model: modifyFields(model, { editor: () => editing(entity, Save.Idle()) }) }
+        ? { model: modifyFields(model, { editor: () => editing(entity, model.type) }) }
         : { model },
     FailedFetchEditBase: ({ version, failure }) =>
       model.editor._tag === "Loading" && model.editor.version === version
         ? { model: modifyFields(model, { editor: () => Editor.Failed({ version, failure }) }) }
         : { model },
-    UpdatedEditText: ({ value }) => ({
-      model: modifyFields(model, {
-        editor: (editor) =>
-          editor._tag === "Editing" ? Editor.Editing({ ...editor, text: value }) : editor,
-      }),
+    GotEditorMessage: ({ message: formMessage }) => foldEditor(model, formMessage),
+    GotDialogMessage: ({ message: dialogMessage }) => foldDialog(model, dialogMessage),
+    SucceededFetchUsage: ({ consumers }) => ({
+      model: modifyFields(model, { usage: () => Usage.Loaded({ usage: consumers.automations }) }),
     }),
-    ClickedSave: () =>
-      Editor.match<UpdateReturn>(model.editor, {
-        Idle: () => ({ model }),
-        Loading: () => ({ model }),
-        Failed: () => ({ model }),
-        Editing: (editor) =>
-          editor.save._tag === "Saving"
+    FailedFetchUsage: ({ failure }) => ({
+      model: modifyFields(model, { usage: () => Usage.Failed({ failure }) }),
+    }),
+    ClickedConfirm: () =>
+      Option.match(model.maybePending, {
+        onNone: () => ({ model }),
+        onSome: (pending) =>
+          model.submission._tag === "Working" || isRefused(model, pending)
             ? { model }
-            : Result.match(parseJson(editor.text), {
-                onFailure: (error) => ({
-                  model: modifyFields(model, {
-                    editor: () =>
-                      withSave(
-                        editor,
-                        Save.Invalid({ message: `Data isn't valid JSON: ${error}` }),
-                      ),
+            : {
+                model: modifyFields(model, { submission: () => Submission.Working() }),
+                commands: [
+                  Pending.match(pending, {
+                    Save: ({ write }) => WriteEntity({ write }),
+                    Delete: ({ entity }) =>
+                      DeleteEntity({ id: entity.id, type: entity.type, expectedRev: entity.rev }),
                   }),
-                }),
-                onSuccess: (data) => ({
-                  model: modifyFields(model, { editor: () => withSave(editor, Save.Saving()) }),
-                  commands: [
-                    SaveEntity({
-                      id: model.id,
-                      version: editor.version,
-                      data,
-                      expectedRev: editor.baseRev,
-                    }),
-                  ],
-                }),
-              }),
+                ],
+              },
       }),
-    SucceededSaveEntity: ({ entity }) =>
-      reloadShown(
-        modifyFields(model, { editor: () => editing(entity, Save.Saved({ rev: entity.rev })) }),
-      ),
-    FailedSaveEntity: ({ failure }) => ({
-      model: modifyFields(model, {
-        editor: (editor) =>
-          withSave(
-            editor,
-            Option.contains(failure.code, "RevConflict")
-              ? Save.Conflict({ currentRev: failure.currentRev })
-              : Save.Failed({ failure }),
-          ),
-      }),
-    }),
+    SucceededSaveEntity: ({ entity }) => {
+      const closed = closeDialog(
+        modifyFields(model, {
+          maybePending: () => Option.none(),
+          submission: () => Submission.Idle(),
+          maybeNotice: () => Option.some(`Saved as rev ${entity.rev}.`),
+          editor: () => editing(entity, model.type),
+        }),
+      );
+      const reloaded = reloadShown(closed.model);
+      return {
+        model: reloaded.model,
+        commands: [...(closed.commands ?? []), ...(reloaded.commands ?? [])],
+      };
+    },
+    FailedWrite: ({ failure }) => {
+      const failed = {
+        model: modifyFields(model, { submission: () => Submission.Failed({ failure }) }),
+      };
+      return Option.contains(failure.code, "EntityLinked") ? reloadBacklinks(failed) : failed;
+    },
     ClickedReload: () => {
       const reloaded = reloadBacklinks(reloadShown(model));
       return Option.match(editorVersion(model.editor), {
         onNone: () => reloaded,
         onSome: (version) => ({
-          model: modifyFields(reloaded.model, { editor: () => Editor.Loading({ version }) }),
+          model: modifyFields(reloaded.model, {
+            editor: () => Editor.Loading({ version }),
+            maybeNotice: () => Option.none(),
+          }),
           commands: [...(reloaded.commands ?? []), FetchEditBase({ id: model.id, version })],
         }),
       });
     },
-    ClickedDelete: () => ({
-      model: modifyFields(model, { deletion: () => Deletion.Confirming() }),
-    }),
-    ClickedCancelDelete: () => ({
-      model: modifyFields(model, { deletion: () => Deletion.Idle() }),
-    }),
-    ClickedConfirmDelete: () =>
+    ClickedDelete: () =>
       EntityState.match<UpdateReturn>(model.entity, {
         Loading: () => ({ model }),
         Failed: () => ({ model }),
         Loaded: ({ entity }) =>
-          model.deletion._tag === "Deleting"
-            ? { model }
-            : {
-                model: modifyFields(model, { deletion: () => Deletion.Deleting() }),
-                commands: [
-                  DeleteEntity({ id: model.id, type: entity.type, expectedRev: entity.rev }),
-                ],
-              },
+          reloadBacklinks(
+            propose(
+              model,
+              Pending.Delete({
+                entity,
+                proposal: entityDeleteProposal(entity, displayTitle(model)),
+              }),
+              entity.type,
+            ),
+          ),
       }),
-    SucceededDeleteEntity: ({ type }) => ({
-      model,
-      commands: [NavigateToType({ name: type })],
-    }),
-    FailedDeleteEntity: ({ failure }) => {
-      const failed = {
-        model: modifyFields(model, { deletion: () => Deletion.Failed({ failure }) }),
+    SucceededDeleteEntity: ({ type }) => {
+      const closed = closeDialog(
+        modifyFields(model, {
+          maybePending: () => Option.none(),
+          submission: () => Submission.Idle(),
+        }),
+      );
+      return {
+        model: closed.model,
+        commands: [...(closed.commands ?? []), NavigateToType({ name: type })],
       };
-      return Option.contains(failure.code, "EntityLinked") ? reloadBacklinks(failed) : failed;
     },
+    ClickedDismissNotice: () => ({
+      model: modifyFields(model, { maybeNotice: () => Option.none() }),
+    }),
     CompletedNavigateToType: () => ({ model }),
   });
 
@@ -904,24 +1061,38 @@ const backlinksView = (model: Model, h: HtmlBuilder<Message>): Html =>
     h,
   );
 
-const saveView = (save: Save, h: HtmlBuilder<Message>): Html =>
-  Save.match(save, {
-    Idle: () => h.empty,
-    Saving: () => statusText("Saving…", h),
-    Invalid: ({ message }) => errorAlert(message, h),
-    Conflict: ({ currentRev }) =>
-      h.div(
+const noticeView = (model: Model, h: HtmlBuilder<Message>): Html =>
+  Option.match(model.maybeNotice, {
+    onNone: () => h.empty,
+    onSome: (notice) =>
+      successAlert(
         [
-          h.Class(
-            "flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive",
+          h.span([h.Class("flex-1")], [notice]),
+          button(
+            {
+              type: "button",
+              variant: "ghost",
+              size: "xs",
+              onClick: Message.ClickedDismissNotice(),
+            },
+            "Dismiss",
+            h,
           ),
-          h.Role("alert"),
         ],
+        h,
+      ),
+  });
+
+const conflictView = (model: Model, h: HtmlBuilder<Message>): Html =>
+  model.submission._tag === "Failed" &&
+  Option.contains(model.submission.failure.code, "RevConflict")
+    ? h.div(
+        [h.Class("flex flex-wrap items-center gap-3 text-sm")],
         [
           h.span(
             [],
             [
-              `Someone else edited this entity${Option.match(currentRev, { onNone: () => "", onSome: (rev) => ` (now at rev ${rev})` })} while you were working. Reload to get their changes; this replaces your edits.`,
+              `Someone else edited this entity${Option.match(model.submission.failure.currentRev, { onNone: () => "", onSome: (rev) => ` (now at rev ${rev})` })}. Reload to get their changes; this replaces your edits.`,
             ],
           ),
           button(
@@ -930,73 +1101,19 @@ const saveView = (save: Save, h: HtmlBuilder<Message>): Html =>
             h,
           ),
         ],
-      ),
-    Failed: ({ failure }) => failureAlert(failure, h),
-    Saved: ({ rev }) => successAlert([`Saved as rev ${rev}.`], h),
-  });
+      )
+    : h.empty;
 
-const editorForm = (
-  editor: Extract<Editor, { readonly _tag: "Editing" }>,
-  h: HtmlBuilder<Message>,
-): Html =>
-  h.form(
-    [h.OnSubmit(Message.ClickedSave()), h.Class("space-y-3"), h.AriaLabel("Edit entity")],
+const deletionView = (h: HtmlBuilder<Message>): Html =>
+  h.div(
+    [h.Class("flex flex-wrap items-center gap-2 border-t border-border pt-4")],
     [
-      textarea(
-        {
-          id: "edit-data",
-          label: `Data as v${editor.version} (JSON)`,
-          description: `Saves with expectedRev ${editor.baseRev}, so concurrent edits aren't overwritten.`,
-          value: editor.text,
-          rows: 12,
-          onInput: (value) => Message.UpdatedEditText({ value }),
-          className: "max-h-[32rem] font-mono text-xs",
-        },
-        h,
-      ),
-      saveView(editor.save, h),
       button(
-        { type: "submit", isDisabled: editor.save._tag === "Saving" },
-        editor.save._tag === "Saving" ? "Saving…" : "Save",
+        { type: "button", variant: "destructive", onClick: Message.ClickedDelete() },
+        "Delete entity",
         h,
       ),
     ],
-  );
-
-const deletionView = (deletion: Deletion, h: HtmlBuilder<Message>): Html =>
-  h.div(
-    [h.Class("flex flex-wrap items-center gap-2 border-t border-border pt-4")],
-    Deletion.match(deletion, {
-      Idle: () => [
-        button(
-          { type: "button", variant: "destructive", onClick: Message.ClickedDelete() },
-          "Delete entity",
-          h,
-        ),
-      ],
-      Confirming: () => [
-        h.span([h.Class("text-sm")], ["Delete this entity? Its history is kept."]),
-        button(
-          { type: "button", variant: "destructive", onClick: Message.ClickedConfirmDelete() },
-          "Yes, delete",
-          h,
-        ),
-        button(
-          { type: "button", variant: "ghost", onClick: Message.ClickedCancelDelete() },
-          "Cancel",
-          h,
-        ),
-      ],
-      Deleting: () => [statusText("Deleting…", h)],
-      Failed: ({ failure }) => [
-        failureAlert(failure, h),
-        button(
-          { type: "button", variant: "destructive", onClick: Message.ClickedConfirmDelete() },
-          "Retry delete",
-          h,
-        ),
-      ],
-    }),
   );
 
 const editView = (model: Model, latest: number, h: HtmlBuilder<Message>): Html =>
@@ -1031,9 +1148,16 @@ const editView = (model: Model, latest: number, h: HtmlBuilder<Message>): Html =
             Idle: () => h.empty,
             Loading: ({ version }) => statusText(`Loading the entity as v${version}…`, h),
             Failed: ({ failure }) => failureAlert(failure, h),
-            Editing: (editor) => editorForm(editor, h),
+            Waiting: () => statusText("Loading the schema…", h),
+            Editing: ({ form }) =>
+              h.submodel({
+                slotId: "entity-editor",
+                model: form,
+                view: EntityForm.view,
+                toParentMessage: (message) => Message.GotEditorMessage({ message }),
+              }),
           }),
-          deletionView(model.deletion, h),
+          deletionView(h),
         ],
       ),
     ],
@@ -1106,6 +1230,7 @@ export const view = Submodel.defineView<Model, Message>((model, h): Html =>
         },
         h,
       ),
+      noticeView(model, h),
       currentView(model, h),
       h.div([h.Class("grid gap-6 lg:grid-cols-2")], [linksView(model, h), backlinksView(model, h)]),
       EntityState.match(model.entity, {
@@ -1119,6 +1244,23 @@ export const view = Submodel.defineView<Model, Message>((model, h): Html =>
           ),
       }),
       historyView(model, h),
+      confirmDialog(
+        {
+          dialog: model.dialog,
+          maybeProposal: Option.map(model.maybePending, (pending) => proposalOf(model, pending)),
+          usage: model.usage,
+          submission: model.submission,
+          maybeChecking: Option.flatMap(model.maybePending, (pending) =>
+            pending._tag === "Delete" && model.backlinks._tag === "Loading"
+              ? Option.some("Checking who links to it…")
+              : Option.none(),
+          ),
+          onConfirm: Message.ClickedConfirm(),
+          toDialogMessage,
+        },
+        h,
+      ),
+      conflictView(model, h),
     ],
   ),
 );
