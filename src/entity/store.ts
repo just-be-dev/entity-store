@@ -1451,6 +1451,21 @@ const makeEntityStore = Effect.gen(function* () {
   });
 
   /**
+   * A dry run of {@link deleteType}'s checks: why the store would refuse to
+   * delete the type right now (empty if it wouldn't). Fails like deleteType
+   * for a missing type or a stale `expectedVersion`.
+   */
+  const checkDeleteType = Effect.fn("EntityStore.checkDeleteType")(function* (
+    name: string,
+    options?: DeleteTypeOptions,
+  ) {
+    const { summary } = yield* registry.typeState(name);
+    yield* requireLatest(name, summary.latestVersion, options?.expectedVersion);
+    const reasons = yield* typeInUse(name);
+    return { type: name, latestVersion: summary.latestVersion, reasons };
+  });
+
+  /**
    * Delete a type, with its versions, indexes, deleted entities, and their
    * revisions and changes. Refused with TypeInUse while it has live entities
    * or another type's latest schema links to it. The type row is deleted
@@ -1464,9 +1479,7 @@ const makeEntityStore = Effect.gen(function* () {
     options?: DeleteTypeOptions,
   ) {
     const expected = options?.expectedVersion;
-    const { summary } = yield* registry.typeState(name);
-    yield* requireLatest(name, summary.latestVersion, expected);
-    const reasons = yield* typeInUse(name);
+    const { reasons } = yield* checkDeleteType(name, options);
     if (reasons.length > 0) {
       return yield* new TypeInUse({ type: name, reasons });
     }
@@ -2108,6 +2121,7 @@ const makeEntityStore = Effect.gen(function* () {
     upsert,
     checkUpsert,
     remove,
+    checkDeleteType,
     deleteType,
     getChange,
     listChanges,

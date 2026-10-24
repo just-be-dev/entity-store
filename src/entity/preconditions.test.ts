@@ -77,10 +77,11 @@ describe("expectedVersion on version writes", () => {
       // This lens doesn't fit v2 (it renames a field v2 lacks): a stale
       // request is refused before the lens is compiled or property-checked.
       const broken: Lens = { ops: [{ op: "rename", from: "missing", to: "body" }] };
-      for (const attempt of [
+      const attempts: ReadonlyArray<Effect.Effect<unknown, { readonly _tag: string }>> = [
         store.addVersion("note", { schema: NoteV3, lens: broken, expectedVersion: 1 }),
         store.checkVersion("note", { schema: NoteV3, lens: broken, expectedVersion: 1 }),
-      ]) {
+      ];
+      for (const attempt of attempts) {
         const error = yield* Effect.flip(attempt);
         expect(error).toMatchObject({
           _tag: "VersionConflict",
